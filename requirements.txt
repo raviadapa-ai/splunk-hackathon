@@ -3,3 +3,5 @@ uvicorn
 requests
 urllib3
 python-dotenv
+streamlit
+pandas

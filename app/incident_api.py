@@ -178,6 +178,24 @@ def create_incident(logs, analysis, remediation, summary):
 
     return incident
 
+def update_incident_status(incident_id, new_status):
+
+    with open("incidents.json", "r") as f:
+        incidents = json.load(f)
+
+    updated = False
+
+    for incident in incidents:
+        if incident["incident_id"] == incident_id:
+            incident["status"] = new_status
+            updated = True
+            break
+
+    with open("incidents.json", "w") as f:
+        json.dump(incidents, f, indent=2)
+
+    return updated
+
 @app.get("/")
 def home():
     return {
@@ -233,3 +251,21 @@ def get_incidents():
         incidents = []
 
     return incidents
+
+@app.post("/remediation/approve/{incident_id}")
+def approve_remediation(incident_id: str):
+
+    success = update_incident_status(incident_id,"APPROVED")
+
+    if not success:
+        return {
+            "success": False,
+            "message": "Incident not found"
+        }
+
+    return {
+        "success": True,
+        "incident_id": incident_id,
+        "status": "APPROVED",
+        "message": "Human approval granted"
+    }

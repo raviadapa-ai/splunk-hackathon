@@ -199,6 +199,7 @@ def incident_summary():
         "logs": logs,
         "ai_summary": summary
     }
+
 @app.get("/create-incident")
 def create_new_incident():
 
@@ -222,3 +223,12 @@ def create_new_incident():
     )
 
     return incident
+
+@app.get("/incidents")
+def get_incidents():
+
+    if not os.path.exists("incidents.json"):
+        return []
+
+    with open("incidents.json", "r") as f:
+        return json.load(f)

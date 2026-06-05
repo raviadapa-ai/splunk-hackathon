@@ -167,7 +167,7 @@ def create_incident(logs, analysis, remediation, summary):
 
     incidents = []
 
-    if os.path.exists("incidents.json"):
+    if os.path.exists("incidents.json") and os.path.getsize("incidents.json") > 0:
         with open("incidents.json", "r") as f:
             incidents = json.load(f)
 
@@ -183,7 +183,6 @@ def home():
     return {
         "message": "Splunk Incident Copilot API is running"
     }
-
 
 @app.get("/incident-summary")
 def incident_summary():
@@ -227,8 +226,10 @@ def create_new_incident():
 @app.get("/incidents")
 def get_incidents():
 
-    if not os.path.exists("incidents.json"):
-        return []
+    try:
+        with open("incidents.json", "r") as f:
+            incidents = json.load(f)
+    except:
+        incidents = []
 
-    with open("incidents.json", "r") as f:
-        return json.load(f)
+    return incidents

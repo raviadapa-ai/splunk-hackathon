@@ -6,5 +6,23 @@
     "root_cause": "Possible database connectivity or connection pool issue",
     "requires_human_approval": true,
     "summary": "Incident Summary:\nRepeated database timeout errors were detected in the application logs.\n\nPossible Impact:\nApplication requests may fail or experience increased latency.\n\nProbable Root Cause:\nPossible database connectivity or connection pool issue\n\nRecommended Action:\n1. Check PostgreSQL service status\n2. Verify database connectivity from application\n3. Check active DB connections\n4. Review connection pool configuration\n5. Restart application only after approval"
+  },
+  {
+    "incident_id": "INC-18aba1c4",
+    "severity": "HIGH",
+    "status": "APPROVED",
+    "root_cause": "Possible database connectivity or connection pool issue",
+    "requires_human_approval": true,
+    "summary": "Incident Summary:\nRepeated database timeout errors were detected in the application logs.\n\nPossible Impact:\nApplication requests may fail or experience increased latency.\n\nProbable Root Cause:\nPossible database connectivity or connection pool issue\n\nRecommended Action:\n1. Check PostgreSQL service status\n2. Verify database connectivity from application\n3. Check active DB connections\n4. Review connection pool configuration\n5. Restart application only after approval"
+  },
+  {
+    "incident_id": "INC-82604651",
+    "severity": "HIGH",
+    "status": "EXECUTED",
+    "root_cause": "Possible database connectivity or connection pool issue",
+    "requires_human_approval": true,
+    "summary": "Incident Summary:\nRepeated database timeout errors were detected in the application logs.\n\nPossible Impact:\nApplication requests may fail or experience increased latency.\n\nProbable Root Cause:\nPossible database connectivity or connection pool issue\n\nRecommended Action:\n1. Check PostgreSQL service status\n2. Verify database connectivity from application\n3. Check active DB connections\n4. Review connection pool configuration\n5. Restart application only after approval",
+    "execution_result": "Simulated remediation executed successfully",
+    "executed_action": "Restart application only after approval"
   }
 ]

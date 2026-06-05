@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
 import json
+import uuid
 import requests
 import urllib3
 from fastapi import FastAPI
@@ -153,6 +154,30 @@ Recommended Action:
 
     return response.json()["response"]
 
+def create_incident(logs, analysis, remediation, summary):
+
+    incident = {
+        "incident_id": f"INC-{str(uuid.uuid4())[:8]}",
+        "severity": analysis["severity"],
+        "status": "OPEN",
+        "root_cause": analysis["probable_root_cause"],
+        "requires_human_approval": remediation["requires_human_approval"],
+        "summary": summary
+    }
+
+    incidents = []
+
+    if os.path.exists("incidents.json"):
+        with open("incidents.json", "r") as f:
+            incidents = json.load(f)
+
+    incidents.append(incident)
+
+    with open("incidents.json", "w") as f:
+        json.dump(incidents, f, indent=2)
+
+    return incident
+
 @app.get("/")
 def home():
     return {
@@ -174,3 +199,26 @@ def incident_summary():
         "logs": logs,
         "ai_summary": summary
     }
+@app.get("/create-incident")
+def create_new_incident():
+
+    logs = fetch_error_logs()
+
+    analysis = analyze_patterns(logs)
+
+    remediation = generate_remediation_plan(analysis)
+
+    summary = generate_incident_summary(
+        logs,
+        analysis,
+        remediation
+    )
+
+    incident = create_incident(
+        logs,
+        analysis,
+        remediation,
+        summary
+    )
+
+    return incident

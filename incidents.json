@@ -1,0 +1,10 @@
+[
+  {
+    "incident_id": "INC-4d7f86a1",
+    "severity": "HIGH",
+    "status": "OPEN",
+    "root_cause": "Possible database connectivity or connection pool issue",
+    "requires_human_approval": true,
+    "summary": "Incident Summary:\nRepeated database timeout errors were detected in the application logs.\n\nPossible Impact:\nApplication requests may fail or experience increased latency.\n\nProbable Root Cause:\nPossible database connectivity or connection pool issue\n\nRecommended Action:\n1. Check PostgreSQL service status\n2. Verify database connectivity from application\n3. Check active DB connections\n4. Review connection pool configuration\n5. Restart application only after approval"
+  }
+]

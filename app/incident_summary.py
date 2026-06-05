@@ -20,7 +20,6 @@ if not SPLUNK_URL or not SPLUNK_USERNAME or not SPLUNK_PASSWORD:
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3.2:1b"
 
-
 def fetch_error_logs():
     query = 'search sourcetype="aiops_logs" ERROR | head 10'
     response = requests.post(
@@ -70,7 +69,6 @@ def analyze_patterns(logs):
         "probable_root_cause": probable_root_cause
     }
 
-
 def generate_remediation_plan(analysis):
     if "database" in analysis["probable_root_cause"].lower():
         actions = [
@@ -94,7 +92,6 @@ def generate_remediation_plan(analysis):
         "severity": analysis["severity"],
         "recommended_actions": actions
     }
-
 
 def generate_incident_summary(logs, analysis, remediation):
     prompt = f"""
@@ -164,4 +161,3 @@ if __name__ == "__main__":
 
     print("\nAI Incident Summary:")
     print(summary)
-

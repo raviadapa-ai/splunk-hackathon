@@ -336,3 +336,39 @@ def close_incident(incident_id: str):
         "success": False,
         "message": "Incident not found"
     }
+
+@app.get("/dashboard")
+def dashboard():
+
+    try:
+        with open("incidents.json", "r") as f:
+            incidents = json.load(f)
+    except:
+        incidents = []
+
+    total = len(incidents)
+
+    open_count = sum(incident["status"] == "OPEN" for incident in incidents)
+    approved_count = sum(incident["status"] == "APPROVED" for incident in incidents)
+    executed_count = sum(incident["status"] == "EXECUTED" for incident in incidents)
+    closed_count = sum(incident["status"] == "CLOSED" for incident in incidents)
+
+    high_count = sum(incident["severity"] == "HIGH" for incident in incidents)
+    medium_count = sum(incident["severity"] == "MEDIUM" for incident in incidents)
+    low_count = sum(incident["severity"] == "LOW" for incident in incidents)
+
+    return {
+        "total_incidents": total,
+        "status_summary": {
+            "open": open_count,
+            "approved": approved_count,
+            "executed": executed_count,
+            "closed": closed_count
+        },
+        "severity_summary": {
+            "high": high_count,
+            "medium": medium_count,
+            "low": low_count
+        },
+        "recent_incidents": incidents[-5:]
+    }

@@ -303,3 +303,36 @@ def execute_remediation(incident_id: str):
         "success": False,
         "message": "Incident not found"
     }
+
+@app.post("/incident/close/{incident_id}")
+def close_incident(incident_id: str):
+
+    with open("incidents.json", "r") as f:
+        incidents = json.load(f)
+
+    for incident in incidents:
+
+        if incident["incident_id"] == incident_id:
+
+            if incident["status"] != "EXECUTED":
+                return {
+                    "success": False,
+                    "message": "Only EXECUTED incidents can be closed"
+                }
+
+            incident["status"] = "CLOSED"
+
+            with open("incidents.json", "w") as f:
+                json.dump(incidents, f, indent=2)
+
+            return {
+                "success": True,
+                "incident_id": incident_id,
+                "status": "CLOSED",
+                "message": "Incident closed successfully"
+            }
+
+    return {
+        "success": False,
+        "message": "Incident not found"
+    }

@@ -269,3 +269,37 @@ def approve_remediation(incident_id: str):
         "status": "APPROVED",
         "message": "Human approval granted"
     }
+
+@app.post("/remediation/execute/{incident_id}")
+def execute_remediation(incident_id: str):
+
+    with open("incidents.json", "r") as f:
+        incidents = json.load(f)
+
+    for incident in incidents:
+        if incident["incident_id"] == incident_id:
+
+            if incident["status"] != "APPROVED":
+                return {
+                    "success": False,
+                    "message": "Remediation cannot execute until human approval is granted"
+                }
+
+            incident["status"] = "EXECUTED"
+            incident["execution_result"] = "Simulated remediation executed successfully"
+            incident["executed_action"] = "Restart application only after approval"
+
+            with open("incidents.json", "w") as f:
+                json.dump(incidents, f, indent=2)
+
+            return {
+                "success": True,
+                "incident_id": incident_id,
+                "status": "EXECUTED",
+                "message": "Remediation executed successfully in simulation mode"
+            }
+
+    return {
+        "success": False,
+        "message": "Incident not found"
+    }

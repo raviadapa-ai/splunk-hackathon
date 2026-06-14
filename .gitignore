@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments and dependency targets
+.venv/
+.venv*/
+.pythonlibs/
+
+# Local test/runtime scratch
+.tmp/
+.testdata/
+.pip-audit-cache/
+pytest-cache-files-*/
+
+# Generated demo/runtime data
+data/*.log
+data/incidents.json
+data/test_*/
+data/*.tmp
+data/*.bak
+
+# Bundle / export artifacts
+code.txt
+project_code_bundle_for_analysis.docx
+
+# Local secrets/config
+.env
+*.local

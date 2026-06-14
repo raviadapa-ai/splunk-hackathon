@@ -1,2 +1,1 @@
-"""Agentic Ops Observability demo package."""
-
+"""Splunk Agentic Ops Incident Copilot demo package."""

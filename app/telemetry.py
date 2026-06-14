@@ -9,7 +9,6 @@ from uuid import uuid4
 from app.config import APP_LOG_PATH, DATA_DIR
 from app.models import TelemetryEvent, utc_now
 
-
 SERVICES = ["checkout-api", "payment-api", "auth-api", "catalog-api", "orders-worker"]
 REGIONS = ["us-east", "us-west", "eu-central", "ap-south"]
 HOSTS = {
@@ -35,6 +34,7 @@ INCIDENT_TYPES = [
     "deployment_regression",
     "cpu_saturation",
     "latency_regression",
+    "memory_pressure",
 ]
 INCIDENT_SERVICE = {
     "database_timeout": "checkout-api",
@@ -43,6 +43,7 @@ INCIDENT_SERVICE = {
     "deployment_regression": "checkout-api",
     "cpu_saturation": "catalog-api",
     "latency_regression": "checkout-api",
+    "memory_pressure": "catalog-api",
 }
 INCIDENT_DEPENDENCY = {
     "database_timeout": "postgres",
@@ -51,6 +52,7 @@ INCIDENT_DEPENDENCY = {
     "deployment_regression": "postgres",
     "cpu_saturation": "none",
     "latency_regression": "redis",
+    "memory_pressure": "redis",
 }
 
 
@@ -65,7 +67,9 @@ class TimelineIncident:
 
 def event_to_json_line(event: TelemetryEvent) -> str:
     payload = event.model_dump(mode="json")
-    payload["timestamp"] = event.timestamp.astimezone().isoformat(timespec="milliseconds")
+    payload["timestamp"] = event.timestamp.astimezone().isoformat(
+        timespec="milliseconds"
+    )
     return json.dumps(payload, separators=(",", ":"))
 
 
@@ -79,11 +83,17 @@ def write_event(event: TelemetryEvent, path: Path | None = None) -> None:
 DEMO_TIMELINE = [
     TimelineIncident(10, "database_timeout", 75, 18, "database_incident"),
     TimelineIncident(20, "upstream_api_failure", 60, 16, "payment_gateway_incident"),
-    TimelineIncident(30, "deployment_regression", 90, 20, "deployment_regression_incident"),
+    TimelineIncident(
+        30, "deployment_regression", 90, 20, "deployment_regression_incident"
+    ),
 ]
 
 
-def normal_event(timestamp: datetime | None = None, timeline_stage: str = "normal", demo_minute: int | None = None) -> TelemetryEvent:
+def normal_event(
+    timestamp: datetime | None = None,
+    timeline_stage: str = "normal",
+    demo_minute: int | None = None,
+) -> TelemetryEvent:
     service = random.choice(SERVICES)
     roll = random.random()
     error_type = "null"
@@ -164,18 +174,38 @@ def incident_event(
         severity="CRITICAL" if status_code >= 500 else "ERROR",
         trace_id=f"{incident_id}-{sequence:03d}",
         user_region=region,
-        cpu_pct=round(random.uniform(88, 99), 2) if incident_type == "cpu_saturation" else round(random.uniform(45, 82), 2),
-        memory_pct=round(random.uniform(86, 96), 2) if incident_type == "cpu_saturation" else round(random.uniform(50, 85), 2),
-        db_connection_pool_pct=round(random.uniform(91, 99), 2) if incident_type in {"database_timeout", "deployment_regression"} else round(random.uniform(30, 75), 2),
+        cpu_pct=(
+            round(random.uniform(88, 99), 2)
+            if incident_type == "cpu_saturation"
+            else round(random.uniform(45, 82), 2)
+        ),
+        memory_pct=(
+            round(random.uniform(86, 96), 2)
+            if incident_type in {"cpu_saturation", "memory_pressure"}
+            else round(random.uniform(50, 85), 2)
+        ),
+        db_connection_pool_pct=(
+            round(random.uniform(91, 99), 2)
+            if incident_type in {"database_timeout", "deployment_regression"}
+            else round(random.uniform(30, 75), 2)
+        ),
         dependency=dependency,
-        deployment_version="2026.06.3" if incident_type == "deployment_regression" else random.choice(VERSIONS),
+        deployment_version=(
+            "2026.06.3"
+            if incident_type == "deployment_regression"
+            else random.choice(VERSIONS)
+        ),
         incident_id=incident_id,
         timeline_stage=timeline_stage or incident_type,
         demo_minute=demo_minute,
     )
 
 
-def inject_incident(incident_type: str | None = None, burst_size: int | None = None, path: Path | None = None) -> str:
+def inject_incident(
+    incident_type: str | None = None,
+    burst_size: int | None = None,
+    path: Path | None = None,
+) -> str:
     selected_type = incident_type or random.choice(INCIDENT_TYPES)
     if selected_type not in INCIDENT_TYPES:
         raise ValueError(f"Unsupported incident type: {selected_type}")
@@ -200,7 +230,11 @@ def _timeline_stage_for_minute(minute: int) -> str:
 
 
 def _timeline_normal_event(timestamp: datetime, minute: int) -> TelemetryEvent:
-    event = normal_event(timestamp=timestamp, timeline_stage=_timeline_stage_for_minute(minute), demo_minute=minute)
+    event = normal_event(
+        timestamp=timestamp,
+        timeline_stage=_timeline_stage_for_minute(minute),
+        demo_minute=minute,
+    )
     if 5 <= minute < 10:
         event.service = "checkout-api"
         event.endpoint = "/checkout"
@@ -222,7 +256,9 @@ def generate_demo_timeline(
 ) -> list[str]:
     """Generate a complete deterministic demo timeline for Splunk ingestion."""
     if duration_minutes < 31:
-        raise ValueError("duration_minutes must be at least 31 to include all planned incidents")
+        raise ValueError(
+            "duration_minutes must be at least 31 to include all planned incidents"
+        )
 
     random.seed(seed)
     output_path = path or APP_LOG_PATH
@@ -230,7 +266,11 @@ def generate_demo_timeline(
     if overwrite:
         output_path.write_text("", encoding="utf-8")
 
-    start = (start_time or utc_now()).astimezone(timezone.utc).replace(second=0, microsecond=0)
+    start = (
+        (start_time or utc_now())
+        .astimezone(timezone.utc)
+        .replace(second=0, microsecond=0)
+    )
     incident_ids: list[str] = []
     incident_by_minute = {incident.minute: incident for incident in DEMO_TIMELINE}
 
@@ -265,7 +305,9 @@ def generate_demo_timeline(
     return incident_ids
 
 
-def run_generator(interval_seconds: float = 5.0, incident_interval_seconds: float = 600.0) -> None:
+def run_generator(
+    interval_seconds: float = 5.0, incident_interval_seconds: float = 600.0
+) -> None:
     next_incident_at = time.monotonic() + incident_interval_seconds
     while True:
         write_event(normal_event())

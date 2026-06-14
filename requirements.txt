@@ -1,0 +1,10 @@
+fastapi==0.136.3
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+httpx==0.28.1
+pytest==9.0.3
+coverage==7.14.1
+ruff==0.15.16
+black==26.5.1
+mypy==1.20.2
+pip-audit==2.10.1

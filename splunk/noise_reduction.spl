@@ -1,0 +1,20 @@
+index=main sourcetype="agentic-ops"
+| eval latency_ms=tonumber(latency_ms), cpu_pct=tonumber(cpu_pct), memory_pct=tonumber(memory_pct), status_code=tonumber(status_code), error_type=coalesce(error_type,"null")
+| eventstats avg(latency_ms) as baseline_latency_avg stdev(latency_ms) as baseline_latency_std avg(cpu_pct) as baseline_cpu_avg stdev(cpu_pct) as baseline_cpu_std avg(memory_pct) as baseline_memory_avg stdev(memory_pct) as baseline_memory_std by service
+| eval latency_z=if(baseline_latency_std>0,(latency_ms-baseline_latency_avg)/baseline_latency_std,0)
+| eval cpu_z=if(baseline_cpu_std>0,(cpu_pct-baseline_cpu_avg)/baseline_cpu_std,0)
+| eval memory_z=if(baseline_memory_std>0,(memory_pct-baseline_memory_avg)/baseline_memory_std,0)
+| eval signal=case(
+    status_code>=500, "server_error",
+    error_type="database_timeout", "database_timeout",
+    error_type="upstream_api_failure", "dependency_failure",
+    error_type="auth_failure", "auth_failure",
+    error_type="deployment_regression", "deployment_regression",
+    error_type="cpu_saturation", "cpu_saturation",
+    error_type="memory_pressure", "memory_pressure",
+    error_type="latency_regression" OR latency_z>2.5, "latency_anomaly",
+    cpu_pct>=90 OR cpu_z>2.5, "cpu_pressure",
+    memory_pct>=90 OR memory_z>2.5, "memory_pressure",
+    true(), "noise"
+)
+| where signal!="noise"

@@ -1,0 +1,173 @@
+## Total Events
+index=main sourcetype="agentic-ops"
+| stats count as total_events
+
+## Noise Reduced
+index=main sourcetype="agentic-ops"
+| eval status_code=tonumber(status_code), latency_ms=tonumber(latency_ms), error_type=coalesce(error_type,"null")
+| eval is_noise=if(status_code<500 AND error_type="null" AND latency_ms<1000,1,0)
+| stats count(eval(is_noise=1)) as noise_events
+
+## Noise reduction percentage
+index=main sourcetype="agentic-ops"
+| eval status_code=tonumber(status_code), latency_ms=tonumber(latency_ms), error_type=coalesce(error_type,"null")
+| eval is_noise=if(status_code<500 AND error_type="null" AND latency_ms<1000, 1, 0)
+| stats count as total_events count(eval(is_noise=1)) as noise_events count(eval(is_noise=0)) as signal_events
+| eval signal_events=total_events-noise_events
+| eval noise_reduction_pct=if(total_events=0,0,round((noise_events/total_events)*100,2))
+
+## Correlated incidents by severity and status
+index=main sourcetype="aiops-incidents" incident_id!="none"
+| sort 0 - _time
+| stats first(_time) as last_seen first(severity) as severity first(incident_status) as incident_status first(status) as status by incident_id
+| eval current_status=coalesce(incident_status,status,"UNKNOWN"), severity=coalesce(severity,"UNKNOWN")
+| stats count as incidents by severity current_status
+| sort severity current_status
+
+## Top affected services
+index=main sourcetype="agentic-ops"
+| eval status_code=tonumber(status_code), error_type=coalesce(error_type,"null")
+| where status_code>=500 OR error_type!="null"
+| stats count by service
+| sort -count
+
+## Top root causes
+index=main sourcetype="aiops-investigations" incident_id!="none"
+| sort 0 - _time
+| stats first(root_cause) as root_cause by incident_id
+| eval root_cause=coalesce(root_cause,"unknown")
+| stats count as incidents by root_cause
+| sort - incidents
+
+## Remediation status
+index=main sourcetype="aiops-remediation" incident_id!="none"
+| sort 0 - _time
+| stats first(remediation_status) as remediation_status by incident_id
+| eval remediation_status=coalesce(remediation_status,"UNKNOWN")
+| stats count as incidents by remediation_status
+| sort - incidents
+
+## Incident timeline
+index=main (sourcetype="aiops-incidents" OR sourcetype="aiops-investigations" OR sourcetype="aiops-remediation") incident_id!="none"
+| eventstats latest(_time) as incident_last_seen by incident_id
+| stats latest(service) as service latest(severity) as severity latest(status) as status latest(incident_status) as incident_status latest(investigation_status) as investigation_status latest(root_cause) as root_cause latest(remediation_status) as remediation_status latest(confidence_score) as confidence_score max(incident_last_seen) as _time by incident_id
+| eval current_status=coalesce(incident_status,status,"UNKNOWN"), remediation_status=coalesce(remediation_status,"NOT_STARTED"), investigation_status=coalesce(investigation_status,"NOT_STARTED")
+| fields _time incident_id service severity current_status investigation_status remediation_status root_cause confidence_score
+| sort - _time
+
+## Application signal summary
+index=main sourcetype="agentic-ops"
+| eval status_code=tonumber(status_code), latency_ms=tonumber(latency_ms), error_type=coalesce(error_type,"null"), severity=coalesce(severity,"UNKNOWN")
+| stats count as events avg(latency_ms) as avg_latency_ms max(latency_ms) as max_latency_ms count(eval(status_code>=500 OR error_type!="null")) as signal_events by service severity error_type
+| eval avg_latency_ms=round(avg_latency_ms,2)
+| sort - signal_events - events
+
+## Investigation summary
+index=main sourcetype="aiops-investigations" incident_id!="none"
+| sort 0 - _time
+| stats count as record_count first(_time) as _time first(service) as service first(severity) as severity first(status) as status first(incident_status) as incident_status first(investigation_status) as investigation_status first(root_cause) as root_cause first(confidence_score) as confidence_score first(evidence_summary) as evidence_summary first(mcp_evidence_summary) as mcp_evidence_summary first(mcp_investigation) as mcp_investigation by incident_id
+| sort - _time
+
+## Remediation summary
+index=main sourcetype="aiops-remediation" incident_id!="none"
+| sort 0 - _time
+| stats first(_time) as _time first(service) as service first(status) as status first(remediation_status) as remediation_status first(action) as action first(result) as result first(approved_by) as approved_by first(evidence_summary) as evidence_summary first(mcp_evidence_summary) as mcp_evidence_summary first(investigation_status) as investigation_status first(mcp_investigation) as mcp_investigation by incident_id
+| sort - _time
+
+## AI triage writeback summary
+(index=main sourcetype="ai-mcp-triage-agent") OR (index=ai_triages sourcetype="ai-mcp-triage-agent")
+| sort 0 - _time
+| stats first(_time) as _time first(service) as service first(status) as status first(severity) as severity first(root_cause) as root_cause first(confidence_score) as confidence_score first(llm_provider) as llm_provider first(hec_status.status) as hec_status first(hec_status.reason) as hec_reason by incident_id
+| sort - _time
+
+## AI Assistant usage
+index=main sourcetype="aiops-ai-assistant"
+| sort 0 - _time
+| table _time incident_id service status intent prompt suggested_spl explanation
+| streamstats count as rownum
+| eval page=ceil(rownum/5)
+| where page=$page$
+| fields _time incident_id service status intent prompt suggested_spl explanation
+
+## Hosted time series forecast
+index=main sourcetype="aiops-forecast"
+| sort 0 - _time
+| table _time incident_id service forecast_horizon predicted_latency_ms lower_bound_latency_ms upper_bound_latency_ms predicted_error_rate_pct confidence_score model_name model_source hosted_model_query
+| streamstats count as rownum
+| eval page=ceil(rownum/5)
+| where page=$page$
+| fields _time incident_id service forecast_horizon predicted_latency_ms lower_bound_latency_ms upper_bound_latency_ms predicted_error_rate_pct confidence_score model_name model_source hosted_model_query
+
+## Startup system health
+index=main sourcetype="aiops-system-health"
+| sort 0 - _time
+| table _time status splunk_version server_name build startup_timestamp fallback_reason
+| streamstats count as rownum
+| eval page=ceil(rownum/5)
+| where page=$page$
+| fields _time status splunk_version server_name build startup_timestamp fallback_reason
+
+## Index validation
+index=main sourcetype="aiops-index-health"
+| sort 0 - _time
+| table _time index_name exists event_count verification_time status fallback_reason
+| streamstats count as rownum
+| eval page=ceil(rownum/5)
+| where page=$page$
+| fields _time index_name exists event_count verification_time status fallback_reason
+
+## Metadata snapshot
+index=main sourcetype="aiops-metadata"
+| sort 0 - _time
+| table _time known_sourcetypes known_hosts known_sources status fallback_reason
+| streamstats count as rownum
+| eval page=ceil(rownum/5)
+| where page=$page$
+| fields _time known_sourcetypes known_hosts known_sources status fallback_reason
+
+## Correlated incidents
+index=main sourcetype="aiops-correlation"
+| sort 0 - _time
+| eval signals=coalesce(mvjoin(signals, ", "), error_type, "unknown")
+| table _time incident_id service host endpoint incident_class signals correlation_score window event_count max_cpu_pct max_memory_pct
+| streamstats count as rownum
+| eval page=ceil(rownum/5)
+| where page=$page$
+| fields _time incident_id service host endpoint incident_class signals correlation_score window event_count max_cpu_pct max_memory_pct
+
+## MCP investigation results
+index=main sourcetype="aiops-investigations" incident_id!="none"
+| sort 0 - _time
+| stats first(_time) as _time first(service) as service first(root_cause) as root_cause first(confidence_score) as confidence_score first(mcp_investigation) as mcp_investigation first(mcp_evidence_summary) as mcp_evidence_summary first(mcp_tools_used) as mcp_tools_used by incident_id
+| eval mcp_tools_used=coalesce(mcp_tools_used,"splunk_run_query")
+| eval mcp_evidence_summary=substr(mcp_evidence_summary,1,220)
+| fields _time incident_id service root_cause confidence_score mcp_investigation mcp_evidence_summary mcp_tools_used
+| sort - _time
+| streamstats count as rownum
+| eval page=ceil(rownum/5)
+| where page=$page$
+| fields _time incident_id service root_cause confidence_score mcp_investigation mcp_evidence_summary mcp_tools_used
+
+## MCP tool usage and metrics
+index=main sourcetype="aiops-mcp-metrics"
+| stats sum(mcp_query_count) as queries sum(mcp_success_count) as successes sum(mcp_failure_count) as failures avg(average_investigation_time) as avg_duration_ms by mcp_tool_usage
+| eval avg_duration_ms=round(avg_duration_ms,2)
+| sort - queries
+
+## Confidence scores
+index=main sourcetype="aiops-investigations" incident_id!="none"
+| sort 0 - _time
+| stats first(_time) as _time first(service) as service first(root_cause) as root_cause first(confidence_score) as confidence_score by incident_id
+| sort - _time
+| table _time incident_id service root_cause confidence_score
+| streamstats count as rownum
+| eval page=ceil(rownum/5)
+| where page=$page$
+| fields _time incident_id service root_cause confidence_score
+
+## Investigation source
+index=main sourcetype="aiops-investigations"
+| eval investigation_source=coalesce(investigation_source,llm_provider,"unknown")
+| eval investigation_source=case(investigation_source="codex_mcp_agent","Codex MCP agent", investigation_source="codex","Codex", match(investigation_source,"^rules_fallback"),"Deterministic fallback", match(investigation_source,"^fallback_alternative_after_codex"),"Codex fallback", match(investigation_source,"manual_investigation"),"Manual investigation", true(), replace(investigation_source,"_"," "))
+| stats count as investigations by investigation_source
+| sort - investigations

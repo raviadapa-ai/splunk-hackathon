@@ -1,0 +1,458 @@
+<dashboard version="1.1">
+  <label>Splunk Agentic Ops Incident Copilot Dashboard</label>
+  <description>An Agentic Platform that reduces noise, correlates signals into incidents, performs MCP-driven investigations, evidence-based RCA, and human-governed remediation with Splunk operational intelligence.</description>
+  <init>
+    <set token="page">1</set>
+  </init>
+  <row>
+    <panel>
+      <title>Total Events</title>
+      <single>
+        <search>
+          <query>index=main sourcetype="agentic-ops"
+| stats count as total_events</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+      </single>
+    </panel>
+    <panel>
+      <title>Noise Reduced</title>
+      <single>
+        <search>
+          <query>index=main sourcetype="agentic-ops"
+| eval status_code=tonumber(status_code), latency_ms=tonumber(latency_ms), error_type=coalesce(error_type,"null")
+| eval is_noise=if(status_code&lt;500 AND error_type="null" AND latency_ms&lt;1000,1,0)
+| stats count(eval(is_noise=1)) as noise_events</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+      </single>
+    </panel>
+    <panel>
+      <title>Noise Reduction</title>
+      <single>
+        <search>
+          <query>index=main sourcetype="agentic-ops" earliest=-24h@h latest=now
+| eval status_code=tonumber(status_code), latency_ms=tonumber(latency_ms), error_type=coalesce(error_type,"null")
+| eval is_noise=if(status_code&lt;500 AND error_type="null" AND latency_ms&lt;1000, 1, 0)
+| stats count as total_events count(eval(is_noise=1)) as noise_events count(eval(is_noise=0)) as signal_events
+| eval noise_reduction_pct=if(total_events=0,0,round((noise_events/total_events)*100,2))
+| eval noise_reduction_pct=tostring(noise_reduction_pct)."%"
+| fields noise_reduction_pct</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+      </single>
+      <html>
+        <style>
+          .dashboard-panel h2, .dashboard-panel .panel-title, .panel-head h3 { font-weight: 700 !important; }
+        </style>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <table>
+        <title>Errors in the last hour</title>
+        <search>
+          <query>index=main sourcetype="agentic-ops" earliest=-1h@h latest=now
+| eval status_code=tonumber(status_code), latency_ms=tonumber(latency_ms), error_type=coalesce(error_type,"null"), severity=coalesce(severity,"UNKNOWN")
+| where status_code&gt;=500 OR error_type!="null"
+| sort 0 - _time
+| table _time service host endpoint status_code latency_ms error_type severity incident_id
+| fields _time service host endpoint status_code latency_ms error_type severity incident_id</query>
+          <earliest>-1h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="count">3</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <table>
+        <title>Baseline Latency Report</title>
+        <search ref="Baseline Latency Report"></search>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Correlated Incidents</title>
+      <table>
+        <search>
+          <query>index=main sourcetype="aiops-correlation"
+| sort 0 - _time
+| eval signals=coalesce(mvjoin(signals, ", "), error_type, "unknown")
+| table _time incident_id service host endpoint incident_class signals correlation_score window event_count
+| streamstats count as rownum
+| eval page=ceil(rownum/5)
+| where page=$page$
+| fields - rownum page
+| fields _time incident_id service host endpoint incident_class signals correlation_score window event_count</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="count">5</option>
+        <option name="wrap">true</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <table>
+        <title>AIOps - Incident Candidate Alert</title>
+        <search>
+          <query>index=main sourcetype="agentic-ops"
+| eval status_code=tonumber(status_code), latency_ms=tonumber(latency_ms), error_type=coalesce(error_type,"null")
+| eventstats avg(latency_ms) as baseline_avg stdev(latency_ms) as baseline_std by service
+| eval z_score=if(baseline_std&gt;0,(latency_ms-baseline_avg)/baseline_std,0)
+| eval signal=case(
+    status_code&gt;=500, "server_error",
+    error_type="database_timeout", "database_timeout",
+    error_type="upstream_api_failure", "dependency_failure",
+    error_type="auth_failure", "auth_failure",
+    error_type="deployment_regression", "deployment_regression",
+    error_type="cpu_saturation", "cpu_saturation",
+    error_type="latency_regression" OR z_score&gt;2.5, "latency_anomaly",
+    true(), "noise"
+)
+| where signal!="noise"
+| bin _time span=5m
+| stats
+    count as signal_count
+    values(signal) as signals
+    values(error_type) as error_types
+    values(host) as hosts
+    values(endpoint) as endpoints
+    values(user_region) as regions
+    avg(latency_ms) as avg_latency
+    max(latency_ms) as max_latency
+    dc(trace_id) as affected_traces
+    by _time service incident_id
+| eval signal_count=tonumber(signal_count)
+| eval correlation_score=signal_count + mvcount(signals)*2 + mvcount(hosts)
+| eval severity=case(
+    correlation_score&gt;=20, "HIGH",
+    correlation_score&gt;=10, "MEDIUM",
+    true(), "LOW"
+)
+| where correlation_score&gt;=5
+| eval incident_candidate="true"
+| sort - _time
+| table _time incident_id service severity signal_count correlation_score signals hosts endpoints regions avg_latency max_latency affected_traces incident_candidate</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="count">5</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Remediation Actions</title>
+      <html>
+        <style>
+          .aiops-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+          .aiops-actions a { display: inline-flex; align-items: center; justify-content: center; border: 1px solid #006d9c; background: #006d9c; color: #fff !important; border-radius: 4px; padding: 7px 12px; cursor: pointer; font-weight: 600; text-decoration: none; min-width: 96px; }
+          .aiops-actions a.reject { border-color: #8a2b0f; background: #8a2b0f; }
+          .aiops-actions a.close-action { border-color: #0f766e; background: #e6fffb; color: #134e4a !important; }
+          .aiops-action-note { margin-top: 8px; color: #555; }
+          .aiops-selected { margin-bottom: 10px; font-weight: 600; }
+        </style>
+        <div class="aiops-selected">Select incident id to investigate and take remediation action: $incident_id$</div>
+        <div class="aiops-actions">
+          <a target="_blank" rel="noopener noreferrer" href="http://127.0.0.1:8002/incidents/$incident_id$/investigate/report">Investigate</a>
+          <a target="_blank" href="http://127.0.0.1:8002/incidents/$incident_id$/assistant">Prepare SPL</a>
+          <a target="_blank" href="http://127.0.0.1:8002/incidents/$incident_id$/approve">Approve</a>
+          <a target="_blank" href="http://127.0.0.1:8002/incidents/$incident_id$/execute">Execute</a>
+          <a target="_blank" class="reject" href="http://127.0.0.1:8002/incidents/$incident_id$/reject">Reject</a>
+          <a target="_blank" class="close-action" href="http://127.0.0.1:8002/incidents/$incident_id$/close">Close</a>
+        </div>
+        <div class="aiops-action-note">Click Investigate first for full detail analysis. The action opens in a new tab and leaves the Splunk dashboard untouched.</div>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Incident Table</title>
+      <table>
+        <search>
+          <query>index=main sourcetype="aiops-incidents" incident_id!="none"
+| sort 0 - _time
+| stats latest(_time) as _time latest(service) as service latest(incident_status) as incident_status latest(severity) as Severity latest(root_cause) as root_cause latest(evidence_summary) as evidence_summary latest(mcp_evidence_summary) as mcp_evidence_summary latest(ai_summary) as ai_summary latest(confidence_score) as confidence_score latest(remediation_status) as remediation_status by incident_id
+| eval root_cause=coalesce(root_cause,"Pending investigation")
+| eval mcp_evidence_summary=coalesce(mcp_evidence_summary,evidence_summary,ai_summary,"")
+| eval ai_summary=coalesce(ai_summary,evidence_summary,"Pending AI summary")
+| eval confidence_score=if(isnull(confidence_score),"",confidence_score)
+| eval Remediation=case(
+    remediation_status="CLOSED","Closed",
+    remediation_status="EXECUTED","Executed",
+    remediation_status="APPROVED","Approved",
+    remediation_status="INVESTIGATED","Investigated",
+    remediation_status="TICKET CLOSED","Closed",
+    remediation_status="Remediation Executed","Executed",
+    remediation_status="REJECTED remediation","Rejected",
+    remediation_status="REJECTED","Rejected",
+    true(),"Open"
+)
+| eval mcp_evidence_summary=substr(mcp_evidence_summary,1,180)
+| sort - _time
+| rename incident_id as id service as Service Severity as Severity
+| fields id Service Severity Remediation root_cause mcp_evidence_summary ai_summary confidence_score</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+          <sampleRatio>1</sampleRatio>
+        </search>
+        <option name="count">5</option>
+        <option name="dataOverlayMode">none</option>
+        <option name="drilldown">row</option>
+        <option name="percentagesRow">false</option>
+        <option name="rowNumbers">false</option>
+        <option name="totalsRow">false</option>
+        <option name="wrap">true</option>
+        <drilldown>
+          <set token="incident_id">$row.id$</set>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+  <row depends="$incident_id$">
+    <panel>
+      <title>Selected Incident AI Summary</title>
+      <table>
+        <search>
+          <query>index=main (sourcetype="aiops-investigations" OR sourcetype="ai-mcp-triage-agent") incident_id="$incident_id$"
+| sort 0 - _time
+| stats latest(_time) as _time latest(service) as service latest(root_cause) as root_cause latest(evidence_summary) as evidence_summary latest(ai_summary) as ai_summary latest(mcp_evidence_summary) as mcp_evidence_summary latest(recommended_actions) as recommended_actions latest(safe_remediation_actions) as safe_remediation_actions latest(confidence_score) as confidence_score by incident_id
+| eval ai_summary=coalesce(ai_summary,evidence_summary,root_cause,"Investigation details pending.")
+| eval recommended_actions=coalesce(recommended_actions,"Remediation recommendation pending.")
+| eval safe_remediation_actions=coalesce(safe_remediation_actions,"Safe remediation action pending.")
+| table _time incident_id service confidence_score root_cause ai_summary mcp_evidence_summary recommended_actions safe_remediation_actions</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="count">1</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Remediation Status</title>
+      <chart>
+        <search>
+          <query>index=main sourcetype="aiops-remediation" incident_id!="none"
+| sort 0 - _time
+| stats first(remediation_status) as remediation_status by incident_id
+| eval remediation_status=coalesce(remediation_status,"UNKNOWN")
+| stats count as incidents by remediation_status
+| sort - incidents</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="charting.chart">pie</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Top Root Causes</title>
+      <chart>
+        <search>
+          <query>index=main sourcetype="aiops-investigations" incident_id!="none"
+| sort 0 - _time
+| stats first(root_cause) as root_cause by incident_id
+| eval root_cause=coalesce(root_cause,"unknown")
+| stats count as incidents by root_cause
+| sort - incidents</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="charting.chart">bar</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>MCP Investigation Results</title>
+      <table>
+        <search>
+          <query>index=main sourcetype="aiops-investigations" incident_id!="none"
+| sort 0 - _time
+| stats first(_time) as _time first(service) as service first(root_cause) as root_cause first(confidence_score) as confidence_score first(mcp_investigation) as mcp_investigation first(mcp_evidence_summary) as mcp_evidence_summary first(mcp_tools_used) as mcp_tools_used by incident_id
+| eval mcp_tools_used=coalesce(mcp_tools_used,"splunk_run_query")
+| eval mcp_evidence_summary=substr(mcp_evidence_summary,1,220)
+| fields _time incident_id service root_cause confidence_score mcp_investigation mcp_evidence_summary mcp_tools_used
+| sort - _time
+| streamstats count as rownum
+| eval page=ceil(rownum/5)
+| where page=$page$
+| fields - rownum page
+| fields _time incident_id service root_cause confidence_score mcp_investigation mcp_evidence_summary mcp_tools_used</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="count">5</option>
+        <option name="wrap">true</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Incident Timeline</title>
+      <table>
+        <search>
+          <query>index=main sourcetype="aiops-timeline" incident_id!="none"
+| sort 0 - _time
+| table _time incident_id service severity status event root_cause remediation_status mcp_investigation
+| streamstats count as rownum
+| eval page=ceil(rownum/5)
+| where page=$page$
+| fields - rownum page
+| fields _time incident_id service severity status event root_cause remediation_status mcp_investigation</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="count">5</option>
+        <option name="wrap">true</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>MCP Tool Usage</title>
+      <chart>
+        <search>
+          <query>index=main sourcetype="aiops-mcp-metrics"
+| stats sum(mcp_query_count) as queries sum(mcp_success_count) as successes sum(mcp_failure_count) as failures avg(average_investigation_time) as avg_duration_ms by mcp_tool_usage
+| eval avg_duration_ms=round(avg_duration_ms,2)
+| sort - queries</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="charting.chart">column</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Investigation Source</title>
+      <chart>
+        <search>
+          <query>index=main sourcetype="aiops-investigations"
+| eval investigation_source=coalesce(investigation_source,llm_provider,"unknown")
+| eval investigation_source=case(investigation_source="codex_mcp_agent","Codex MCP agent", investigation_source="codex","Codex", match(investigation_source,"^rules_fallback"),"Deterministic fallback", match(investigation_source,"^fallback_alternative_after_codex"),"Codex fallback", match(investigation_source,"manual_investigation"),"Manual investigation", true(), replace(investigation_source,"_"," "))
+| stats count as investigations by investigation_source
+| sort - investigations</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="charting.chart">bar</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Forecast Summary</title>
+      <table>
+        <search>
+          <query>index=main sourcetype="aiops-forecast"
+| sort 0 - _time
+| dedup service
+| eval risk=case(predicted_latency_ms&gt;=3000,"Critical",predicted_latency_ms&gt;=1450,"High",1=1,"Healthy")
+| stats count(eval(risk="Critical")) as "Predicted Critical Incidents" count as "Services At Risk" avg(confidence_score) as avg_confidence
+| eval "Avg Forecast Confidence"=round(avg_confidence*100,0)."%"
+| fields "Predicted Critical Incidents" "Services At Risk" "Avg Forecast Confidence"</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="count">1</option>
+        <option name="wrap">true</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Forecast Risk Table</title>
+      <table>
+        <search>
+          <query>index=main sourcetype="aiops-forecast"
+| sort 0 - _time
+| dedup service
+| eval risk=case(predicted_latency_ms&gt;=3000,"Critical",predicted_latency_ms&gt;=1450,"High",1=1,"Healthy")
+| eval eta=if(risk="Healthy","-",replace(forecast_horizon,"m$"," min"))
+| eval confidence=tostring(round(confidence_score*100,0))."%"
+| table _time service risk eta confidence
+| sort - _time
+| streamstats count as rownum
+| eval page=ceil(rownum/5)
+| where page=$page$
+| fields - rownum page
+| fields _time service risk eta confidence</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="count">5</option>
+        <option name="wrap">true</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>AI Assistant Usage</title>
+      <table>
+        <search>
+          <query>index=main sourcetype="aiops-ai-assistant"
+| sort 0 - _time
+| table _time incident_id service status intent prompt suggested_spl explanation
+| streamstats count as rownum
+| eval page=ceil(rownum/5)
+| where page=$page$
+| fields - rownum page
+| fields _time incident_id service status intent prompt suggested_spl explanation</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="count">5</option>
+        <option name="wrap">true</option>
+      </table>
+    </panel>
+  </row>
+</dashboard>

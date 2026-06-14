@@ -1,0 +1,69 @@
+[monitor://$PROJECT_ROOT/data/app.log]
+disabled = 0
+index = main
+sourcetype = agentic-ops
+
+[monitor://$PROJECT_ROOT/data/incidents.log]
+disabled = 0
+index = main
+sourcetype = aiops-incidents
+
+[monitor://$PROJECT_ROOT/data/aiops_investigations.log]
+disabled = 0
+index = main
+sourcetype = aiops-investigations
+
+[monitor://$PROJECT_ROOT/data/aiops_remediation.log]
+disabled = 0
+index = main
+sourcetype = aiops-remediation
+
+[monitor://$PROJECT_ROOT/data/ai_triages.log]
+disabled = 0
+index = main
+sourcetype = ai-mcp-triage-agent
+
+[monitor://$PROJECT_ROOT/data/system_health.log]
+disabled = 0
+index = main
+sourcetype = aiops-system-health
+
+[monitor://$PROJECT_ROOT/data/index_health.log]
+disabled = 0
+index = main
+sourcetype = aiops-index-health
+
+[monitor://$PROJECT_ROOT/data/metadata_snapshot.log]
+disabled = 0
+index = main
+sourcetype = aiops-metadata
+
+[monitor://$PROJECT_ROOT/data/correlation.log]
+disabled = 0
+index = main
+sourcetype = aiops-correlation
+
+[monitor://$PROJECT_ROOT/data/timeline.log]
+disabled = 0
+index = main
+sourcetype = aiops-timeline
+
+[monitor://$PROJECT_ROOT/data/mcp_metrics.log]
+disabled = 0
+index = main
+sourcetype = aiops-mcp-metrics
+
+[monitor://$PROJECT_ROOT/data/splunk_ai_activity.log]
+disabled = 0
+index = main
+sourcetype = aiops-splunk-ai-activity
+
+[monitor://$PROJECT_ROOT/data/ai_assistant.log]
+disabled = 0
+index = main
+sourcetype = aiops-ai-assistant
+
+[monitor://$PROJECT_ROOT/data/forecast.log]
+disabled = 0
+index = main
+sourcetype = aiops-forecast

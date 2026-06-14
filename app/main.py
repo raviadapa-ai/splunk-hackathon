@@ -16,14 +16,24 @@ from app.decision_engine import (
     decide_investigation,
 )
 from app.llm_agent import CodexRcaAgent
-from app.models import Evidence, Incident, Severity, log_timestamp, utc_now
+from app.models import (
+    AssistantSuggestion,
+    Evidence,
+    ForecastSignal,
+    Incident,
+    Severity,
+    log_timestamp,
+    utc_now,
+)
 from app.splunk_mcp_client import SplunkMCPClient, extract_result_rows, extract_result_text
 from app.storage import (
     load_jsonl_events,
     load_incidents,
     upsert_incident,
+    write_ai_assistant_event,
     write_ai_triage_event,
     write_correlation_event,
+    write_forecast_event,
     write_index_health_event,
     write_incident_event,
     write_investigation_event,
@@ -35,7 +45,7 @@ from app.storage import (
 )
 from app.telemetry import inject_incident, normal_event, write_event
 
-app = FastAPI(title="Agentic Ops Observability", version="1.0.0")
+app = FastAPI(title="Splunk Agentic Ops Incident Copilot", version="1.0.0")
 
 PUBLIC_PATHS = {"/health"}
 STARTUP_VERIFICATION_CACHE: dict[str, Any] = {}
@@ -151,6 +161,37 @@ def _write_timeline(
     )
 
 
+def _incident_event_base(incident: Incident) -> dict[str, Any]:
+    return {
+        "timestamp": _timestamp(),
+        "incident_id": incident.incident_id,
+        "service": incident.service,
+        "status": incident.status,
+        "severity": incident.severity,
+        "root_cause": incident.root_cause,
+        "confidence_score": incident.confidence_score,
+        "evidence_summary": incident.evidence_summary,
+        "ai_summary": incident.ai_summary,
+        "mcp_evidence_summary": incident.mcp_evidence_summary,
+        "llm_provider": incident.llm_provider,
+        "mcp_investigation": incident.mcp_investigation,
+        "mcp_tools_used": incident.mcp_tools_used,
+        "spl_queries_used": incident.spl_queries_used,
+        "mcp_log_event_count": incident.mcp_log_event_count,
+        "approved_by": incident.approved_by,
+        "remediation_status": incident.remediation_status,
+        "remediation_result": incident.remediation_result,
+    }
+
+
+def _incident_event_record(
+    incident: Incident, **extra: Any
+) -> dict[str, Any]:
+    record = _incident_event_base(incident)
+    record.update(extra)
+    return record
+
+
 def _write_correlation_from_evidence(
     incident: Incident,
     evidence: Evidence,
@@ -161,7 +202,16 @@ def _write_correlation_from_evidence(
     signals = sorted({item for item in evidence.error_types if item and item != "null"})
     hosts = sorted({item for item in evidence.hosts if item})
     endpoints = sorted({item for item in evidence.endpoints if item})
-    correlation_score = evidence.event_count + len(signals) * 2 + len(hosts)
+    resource_pressure_score = (
+        4 if evidence.max_cpu_pct >= 90 or evidence.max_memory_pct >= 90 else 0
+    )
+    correlation_score = (
+        evidence.event_count
+        + len(signals) * 2
+        + len(hosts)
+        + len(endpoints)
+        + resource_pressure_score
+    )
     write_correlation_event(
         {
             "timestamp": _timestamp(),
@@ -177,6 +227,8 @@ def _write_correlation_from_evidence(
             "window": "5m",
             "correlation_score": correlation_score,
             "event_count": evidence.event_count,
+            "max_cpu_pct": round(evidence.max_cpu_pct, 2),
+            "max_memory_pct": round(evidence.max_memory_pct, 2),
             "source": source,
             "sourcetype": "aiops-correlation",
         }
@@ -187,31 +239,127 @@ async def _record_splunk_ai_assistant_activity(
     client: SplunkMCPClient,
     incident: Incident,
     evidence: Evidence,
-) -> None:
-    seed_spl = (
+) -> AssistantSuggestion:
+    suggested_spl = (
         'index=main sourcetype="agentic-ops" '
-        f'service="{incident.service}" incident_id="{incident.incident_id}" '
-        "| stats count avg(latency_ms) max(latency_ms) max(cpu_pct) "
-        "max(db_connection_pool_pct) by service host endpoint error_type"
+        f'(service="{incident.service}" OR incident_id="{incident.incident_id}") '
+        "| eval status_code=tonumber(status_code), latency_ms=tonumber(latency_ms), cpu_pct=tonumber(cpu_pct), memory_pct=tonumber(memory_pct), error_type=coalesce(error_type,\"null\") "
+        "| eventstats avg(latency_ms) as baseline_latency_avg stdev(latency_ms) as baseline_latency_std avg(cpu_pct) as baseline_cpu_avg stdev(cpu_pct) as baseline_cpu_std avg(memory_pct) as baseline_memory_avg stdev(memory_pct) as baseline_memory_std by service "
+        "| eval latency_z=if(baseline_latency_std>0,(latency_ms-baseline_latency_avg)/baseline_latency_std,0) "
+        "| eval cpu_z=if(baseline_cpu_std>0,(cpu_pct-baseline_cpu_avg)/baseline_cpu_std,0) "
+        "| eval memory_z=if(baseline_memory_std>0,(memory_pct-baseline_memory_avg)/baseline_memory_std,0) "
+        "| eval signal=case(status_code>=500, \"server_error\", error_type=\"database_timeout\", \"database_timeout\", error_type=\"upstream_api_failure\", \"dependency_failure\", error_type=\"auth_failure\", \"auth_failure\", error_type=\"deployment_regression\", \"deployment_regression\", error_type=\"cpu_saturation\", \"cpu_saturation\", error_type=\"memory_pressure\", \"memory_pressure\", error_type=\"latency_regression\" OR latency_z>2.5, \"latency_anomaly\", cpu_pct>=90 OR cpu_z>2.5, \"cpu_pressure\", memory_pct>=90 OR memory_z>2.5, \"memory_pressure\", true(), \"noise\") "
+        "| where signal!=\"noise\" "
+        "| bin _time span=5m "
+        "| stats count as signal_count values(signal) as signals values(host) as hosts values(endpoint) as endpoints avg(latency_ms) as avg_latency max(latency_ms) as max_latency avg(cpu_pct) as avg_cpu_pct max(cpu_pct) as max_cpu_pct avg(memory_pct) as avg_memory_pct max(memory_pct) as max_memory_pct by _time service incident_id"
     )
     prompt = (
-        f"{incident.root_cause or 'service anomaly'} on {incident.service}; "
-        f"signals={', '.join(evidence.error_types) or 'unknown'}"
+        "Generate or refine a Splunk SPL query for incident correlation and noise reduction. "
+        f"Incident {incident.incident_id} on {incident.service} has root cause {incident.root_cause or 'pending'} "
+        f"and signals {', '.join(evidence.error_types) or 'unknown'}. "
+        "Focus on grouping by service, incident_id, 5-minute windows, signal counts, host diversity, latency anomalies, and resource pressure from cpu_pct and memory_pct."
     )
-    record: dict[str, Any] = {
-        "timestamp": _timestamp(),
-        "incident_id": incident.incident_id,
-        "service": incident.service,
-        "original_spl": seed_spl,
-        "optimized_spl": seed_spl,
-        "generated_spl": seed_spl,
-        "spl_explanation": "Splunk AI Assistant is disabled because the feature is not activated.",
-        "ai_reasoning": "Splunk AI Assistant is disabled; investigation continues without SAIA.",
-        "status": "disabled",
-        "fallback_reason": "feature_not_activated",
-        "sourcetype": "aiops-splunk-ai-activity",
-    }
-    write_splunk_ai_activity_event(record)
+    suggestion = AssistantSuggestion(
+        incident_id=incident.incident_id,
+        service=incident.service,
+        intent="generate_spl",
+        prompt=prompt,
+        suggested_spl=suggested_spl,
+        explanation=(
+            "Prepared for Splunk AI Assistant usage. Paste the prompt into AI Assistant or use the generated SPL "
+            "as the starting point for correlation tuning."
+        ),
+    )
+    write_ai_assistant_event(
+        {
+            "timestamp": _timestamp(),
+            "incident_id": suggestion.incident_id,
+            "service": suggestion.service,
+            "status": suggestion.status,
+            "intent": suggestion.intent,
+            "prompt": suggestion.prompt,
+            "suggested_spl": suggestion.suggested_spl,
+            "explanation": suggestion.explanation,
+            "source": suggestion.source,
+            "sourcetype": "aiops-ai-assistant",
+        }
+    )
+    write_splunk_ai_activity_event(
+        {
+            "timestamp": _timestamp(),
+            "incident_id": suggestion.incident_id,
+            "service": suggestion.service,
+            "status": "prepared",
+            "original_spl": suggestion.suggested_spl,
+            "optimized_spl": suggestion.suggested_spl,
+            "generated_spl": suggestion.suggested_spl,
+            "spl_explanation": suggestion.explanation,
+            "ai_reasoning": suggestion.prompt,
+            "fallback_reason": "ai_assistant_ready_for_splunk_ui_usage",
+            "sourcetype": "aiops-splunk-ai-activity",
+        }
+    )
+    return suggestion
+
+
+def _forecast_from_evidence(incident: Incident, evidence: Evidence) -> ForecastSignal:
+    baseline_latency = evidence.avg_latency_ms or evidence.max_latency_ms or 0
+    volatility = max(evidence.max_latency_ms - baseline_latency, 0)
+    predicted = round(max(baseline_latency, evidence.max_latency_ms * 0.85), 2)
+    lower = round(max(predicted * 0.85, 0), 2)
+    upper = round(predicted * 1.15 + volatility * 0.1, 2)
+    predicted_error_rate = round(
+        min(100.0, 2.5 + evidence.event_count * 0.35 + volatility / 250), 2
+    )
+    confidence = round(
+        min(0.95, 0.55 + min(evidence.event_count, 20) * 0.02), 2
+    )
+    if incident.severity in {"HIGH", "CRITICAL"}:
+        confidence = min(0.95, confidence + 0.08)
+    hosted_model_query = (
+        'index=main sourcetype="agentic-ops" '
+        f'service="{incident.service}" '
+        "| timechart span=5m avg(latency_ms) as latency_ms max(status_code) as status_code "
+        "| predict latency_ms future_timespan=3 holdback=5"
+    )
+    return ForecastSignal(
+        service=incident.service,
+        incident_id=incident.incident_id,
+        predicted_latency_ms=predicted,
+        lower_bound_latency_ms=lower,
+        upper_bound_latency_ms=upper,
+        predicted_error_rate_pct=predicted_error_rate,
+        confidence_score=confidence,
+        model_name="hosted_time_series_ready",
+        model_source="fallback_ewma",
+        hosted_model_query=hosted_model_query,
+        supporting_events=evidence.event_count,
+    )
+
+
+def _record_forecast_signal(incident: Incident, evidence: Evidence) -> ForecastSignal:
+    forecast = _forecast_from_evidence(incident, evidence)
+    write_forecast_event(
+        {
+            "timestamp": _timestamp(),
+            "incident_id": forecast.incident_id,
+            "service": forecast.service,
+            "status": forecast.status,
+            "forecast_horizon": forecast.forecast_horizon,
+            "predicted_latency_ms": forecast.predicted_latency_ms,
+            "lower_bound_latency_ms": forecast.lower_bound_latency_ms,
+            "upper_bound_latency_ms": forecast.upper_bound_latency_ms,
+            "predicted_error_rate_pct": forecast.predicted_error_rate_pct,
+            "confidence_score": forecast.confidence_score,
+            "model_name": forecast.model_name,
+            "model_source": forecast.model_source,
+            "hosted_model_query": forecast.hosted_model_query,
+            "supporting_events": forecast.supporting_events,
+            "source": forecast.source,
+            "sourcetype": "aiops-forecast",
+        }
+    )
+    return forecast
 
 
 async def _verify_startup_with_splunk_mcp() -> dict[str, Any]:
@@ -444,6 +592,21 @@ def _format_ai_summary(alert_name: str, incident: Incident) -> str:
         if incident.recommended_actions
         else "Continue monitoring"
     )
+
+
+def _format_fallback_rca_summary(alert_name: str, incident: Incident) -> str:
+    actions = (
+        "; ".join(incident.recommended_actions)
+        if incident.recommended_actions
+        else "No recommended actions captured yet"
+    )
+    return (
+        f"RCA fallback for {alert_name}: {incident.service} is affected by "
+        f"{incident.root_cause or 'an undetermined service anomaly'}. "
+        f"Confidence {incident.confidence_score or 0:.2f}. "
+        f"Evidence: {incident.evidence_summary or 'No evidence summary available.'} "
+        f"Recommended actions: {actions}."
+    )
     return (
         f"Alert '{alert_name}' was triaged for {incident.service}. "
         f"Root cause: {incident.root_cause or 'undetermined service anomaly'}. "
@@ -459,7 +622,9 @@ def _explanatory_ai_summary(
     incident: Incident,
     summary_text: str | None = None,
 ) -> str:
-    base_summary = (summary_text or incident.ai_summary or "").strip()
+    base_summary = (
+        summary_text or incident.ai_summary or incident.fallback_rca_summary or ""
+    ).strip()
     if not base_summary:
         base_summary = _format_ai_summary(alert_name, incident)
 
@@ -606,13 +771,28 @@ def _apply_investigation_result(
     mcp_evidence_summary: str | None,
 ) -> None:
     incident.status = "COMPLETED"
+    incident.remediation_status = "INVESTIGATED"
     incident.severity = result.severity
     incident.root_cause = result.root_cause
     incident.confidence_score = result.confidence_score
     incident.evidence_summary = result.evidence_summary
     incident.ai_summary = result.ai_summary
+    incident.fallback_rca_summary = getattr(result, "fallback_rca_summary", None)
     incident.llm_provider = result.source
-    incident.mcp_evidence_summary = mcp_evidence_summary
+    incident.mcp_evidence_summary = (
+        mcp_evidence_summary
+        or getattr(result, "mcp_evidence_summary", None)
+        or (
+            f"MCP evidence summary: {result.evidence_summary}"
+            if getattr(result, "mcp_investigation", False) and result.evidence_summary
+            else None
+        )
+        or (
+            f"MCP evidence for {incident.service}: {incident.mcp_log_event_count} events."
+            if getattr(result, "mcp_investigation", False)
+            else None
+        )
+    )
     incident.mcp_investigation = mcp_evidence is not None or bool(
         getattr(result, "mcp_investigation", False)
     )
@@ -739,9 +919,8 @@ def _maybe_codex_enhancement(
             }:
                 result.source = "fallback_alternative_after_codex_unavailable"
             if not result.ai_summary:
-                result.ai_summary = (
-                    f"RCA for {incident.service}: root cause appears to be {result.root_cause}. "
-                    f"Confidence {result.confidence_score:.2f}. {result.evidence_summary}"
+                result.fallback_rca_summary = _format_fallback_rca_summary(
+                    alert_name, incident
                 )
             result.raw_response = (
                 (result.raw_response or "")
@@ -752,7 +931,7 @@ def _maybe_codex_enhancement(
             result = decide_investigation(
                 evidence, source="fallback_alternative_after_codex_failure"
             )
-            result.ai_summary = (
+            result.fallback_rca_summary = (
                 f"Mandatory Codex reasoning failed, so deterministic RCA was used for continuity. "
                 f"RCA for {incident.service}: root cause appears to be {result.root_cause}. "
                 f"Confidence {result.confidence_score:.2f}. {result.evidence_summary}"
@@ -820,20 +999,14 @@ def _apply_remediation_outcome(
     incident.updated_at = utc_now()
     upsert_incident(incident)
     write_incident_event(
-        {
-            "timestamp": _timestamp(),
-            "incident_id": incident.incident_id,
-            "service": incident.service,
-            "status": incident.status,
-            "severity": incident.severity,
-            "root_cause": incident.root_cause,
-            "approved_by": incident.approved_by,
-            "incident_status": incident.status,
-            "remediation_status": incident.remediation_status,
-            "remediation_result": incident.remediation_result,
-            "action": action,
-            "sourcetype": "aiops-incidents",
-        }
+        _incident_event_record(
+            incident,
+            incident_status=incident.status,
+            remediation_status=incident.remediation_status,
+            remediation_result=incident.remediation_result,
+            action=action,
+            sourcetype="aiops-incidents",
+        )
     )
     write_remediation_event(
         {
@@ -843,6 +1016,7 @@ def _apply_remediation_outcome(
             "status": incident.status,
             "severity": incident.severity,
             "root_cause": incident.root_cause,
+            "ai_summary": incident.ai_summary,
             "remediation_status": incident.remediation_status,
             "approved_by": incident.approved_by,
             "evidence_summary": incident.evidence_summary,
@@ -871,7 +1045,9 @@ def _incident_action_urls(request: Request, incident_id: str) -> dict[str, str]:
     return {
         "investigate": str(
             request.url_for("investigate_incident", incident_id=incident_id)
-        ),
+        )
+        + "?refresh=1",
+        "assistant": str(request.url_for("prepare_ai_assistant", incident_id=incident_id)),
         "approve": str(request.url_for("approve_incident", incident_id=incident_id)),
         "execute": str(request.url_for("execute_remediation", incident_id=incident_id)),
         "reject": str(request.url_for("reject_remediation", incident_id=incident_id)),
@@ -884,6 +1060,39 @@ def _count_by_field(events: list[dict[str, Any]], field: str) -> dict[str, int]:
     for event in events:
         value = str(event.get(field) or "unknown")
         counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True)[:8])
+
+
+def _friendly_investigation_source(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "Unknown"
+
+    normalized = raw.lower()
+    if normalized in {"codex", "codex_mcp_agent"}:
+        return "Codex MCP agent"
+    if "fallback_alternative_after_codex_failure" in normalized:
+        return "Codex fallback after failure"
+    if "fallback_alternative_after_codex_unavailable" in normalized:
+        return "Codex fallback unavailable"
+    if "rules_fallback" in normalized:
+        return "Deterministic fallback"
+    if "manual_investigation" in normalized:
+        return "Manual investigation"
+    if "splunk_mcp_evidence" in normalized:
+        return "Splunk MCP evidence"
+    if normalized.startswith("http://") or normalized.startswith("https://"):
+        return "Webhook triage"
+    return raw.replace("_", " ").strip().title()
+
+
+def _investigation_source_counts(events: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in events:
+        label = _friendly_investigation_source(
+            event.get("investigation_source") or event.get("llm_provider")
+        )
+        counts[label] = counts.get(label, 0) + 1
     return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True)[:8])
 
 
@@ -911,7 +1120,7 @@ def _noise_reduction_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _recent_events(filename: str, limit: int = 6) -> list[dict[str, Any]]:
+def _recent_events(filename: str, limit: int = 5) -> list[dict[str, Any]]:
     events = load_jsonl_events(filename, limit=200)
     return sorted(
         events,
@@ -920,8 +1129,21 @@ def _recent_events(filename: str, limit: int = 6) -> list[dict[str, Any]]:
     )[:limit]
 
 
+def _latest_event_for_incident(
+    events: list[dict[str, Any]], incident_id: str
+) -> dict[str, Any] | None:
+    for event in sorted(events, key=lambda item: str(item.get("timestamp") or ""), reverse=True):
+        if str(event.get("incident_id") or "") == incident_id:
+            return event
+    return None
+
+
+def _latest_remediation_event(incident_id: str) -> dict[str, Any] | None:
+    return _latest_event_for_incident(load_jsonl_events("aiops_remediation.log", limit=500), incident_id)
+
+
 def _latest_incident_events(
-    events: list[dict[str, Any]], limit: int = 6
+    events: list[dict[str, Any]], limit: int = 5
 ) -> list[dict[str, Any]]:
     by_incident: dict[str, dict[str, Any]] = {}
     for event in sorted(events, key=lambda item: str(item.get("timestamp") or "")):
@@ -933,6 +1155,98 @@ def _latest_incident_events(
         key=lambda item: str(item.get("timestamp") or ""),
         reverse=True,
     )[:limit]
+
+
+def _latest_event_summary_by_incident(
+    events: list[dict[str, Any]], field: str
+) -> dict[str, str]:
+    summaries: dict[str, str] = {}
+    for event in sorted(events, key=lambda item: str(item.get("timestamp") or "")):
+        incident_id = str(event.get("incident_id") or "")
+        summary = str(event.get(field) or "").strip()
+        if incident_id and incident_id != "none" and summary:
+            summaries[incident_id] = summary
+    return summaries
+
+
+def _latest_ai_summary_for_incident(incident_id: str) -> str | None:
+    ai_triage_events = load_jsonl_events("ai_triages.log", limit=500)
+    ai_summary_by_incident = _latest_event_summary_by_incident(
+        ai_triage_events, "ai_summary"
+    )
+    summary = ai_summary_by_incident.get(incident_id)
+    return summary if summary else None
+
+
+def _latest_mcp_evidence_summary_for_incident(incident_id: str) -> str | None:
+    investigation_events = load_jsonl_events("aiops_investigations.log", limit=500)
+    triage_events = load_jsonl_events("ai_triages.log", limit=500)
+    combined_events = sorted(
+        investigation_events + triage_events,
+        key=lambda item: str(item.get("timestamp") or ""),
+    )
+    summaries = _latest_event_summary_by_incident(
+        combined_events, "mcp_evidence_summary"
+    )
+    summary = summaries.get(incident_id)
+    return summary if summary else None
+
+
+def _forecast_risk_label(event: dict[str, Any]) -> str:
+    try:
+        predicted_latency_ms = float(event.get("predicted_latency_ms") or 0)
+    except (TypeError, ValueError):
+        predicted_latency_ms = 0.0
+    if predicted_latency_ms >= 3000:
+        return "Critical"
+    if predicted_latency_ms >= 1450:
+        return "High"
+    return "Healthy"
+
+
+def _forecast_eta_label(event: dict[str, Any], risk: str) -> str:
+    if risk == "Healthy":
+        return "-"
+    horizon = str(event.get("forecast_horizon") or "").strip()
+    if not horizon:
+        return "-"
+    if horizon.endswith("m"):
+        return f"{horizon[:-1]} min"
+    return horizon
+
+
+def _forecast_table_rows(events: list[dict[str, Any]], limit: int = 3) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for event in _latest_incident_events(events, limit=limit):
+        risk = _forecast_risk_label(event)
+        try:
+            confidence_score = float(event.get("confidence_score") or 0)
+        except (TypeError, ValueError):
+            confidence_score = 0.0
+        rows.append(
+            {
+                "service": _event_value(event, "service", default="unknown"),
+                "risk": risk,
+                "eta": _forecast_eta_label(event, risk),
+                "confidence_pct": max(0, min(round(confidence_score * 100), 100)),
+            }
+        )
+    return rows
+
+
+def _forecast_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    confidence_values = [
+        int(row["confidence_pct"])
+        for row in rows
+        if isinstance(row.get("confidence_pct"), int)
+    ]
+    critical_count = sum(1 for row in rows if row.get("risk") == "Critical")
+    avg_confidence = round(sum(confidence_values) / len(confidence_values)) if confidence_values else 0
+    return {
+        "predicted_critical_incidents": critical_count,
+        "services_at_risk": len(rows),
+        "avg_forecast_confidence": avg_confidence,
+    }
 
 
 def _dashboard_payload(request: Request) -> dict[str, object]:
@@ -953,6 +1267,12 @@ def _dashboard_payload(request: Request) -> dict[str, object]:
     recent_incidents = []
     for incident in sorted_incidents[start:end]:
         item = incident.model_dump(mode="json")
+        triage_summary = _latest_ai_summary_for_incident(incident.incident_id)
+        if triage_summary:
+            item["ai_summary"] = triage_summary
+        mcp_summary = _latest_mcp_evidence_summary_for_incident(incident.incident_id)
+        if mcp_summary:
+            item["mcp_evidence_summary"] = mcp_summary
         item["action_urls"] = _incident_action_urls(request, incident.incident_id)
         recent_incidents.append(item)
     primary_incident = recent_incidents[0] if recent_incidents else None
@@ -967,6 +1287,9 @@ def _dashboard_payload(request: Request) -> dict[str, object]:
     timeline_events = load_jsonl_events("timeline.log", limit=500)
     metric_events = load_jsonl_events("mcp_metrics.log", limit=500)
     ai_activity_events = load_jsonl_events("splunk_ai_activity.log", limit=500)
+    assistant_events = load_jsonl_events("ai_assistant.log", limit=500)
+    forecast_events = load_jsonl_events("forecast.log", limit=500)
+    forecast_rows = _forecast_table_rows(forecast_events, limit=3)
 
     return {
         "total_incidents": len(incidents),
@@ -989,14 +1312,16 @@ def _dashboard_payload(request: Request) -> dict[str, object]:
         ),
         "mcp_investigation_results": _latest_incident_events(investigation_events),
         "remediation_status": _count_by_field(remediation_events, "remediation_status"),
-        "incident_timeline": _recent_events("timeline.log", limit=8)
-        or _recent_events("incidents.log", limit=8),
+        "incident_timeline": _recent_events("timeline.log", limit=5)
+        or _recent_events("incidents.log", limit=5),
         "mcp_tool_usage": _count_by_field(metric_events, "mcp_tool_usage"),
         "confidence_scores": _latest_incident_events(investigation_events),
-        "investigation_source": _count_by_field(
-            investigation_events, "investigation_source"
-        ),
+        "investigation_source": _investigation_source_counts(investigation_events),
         "splunk_ai_activity": _latest_incident_events(ai_activity_events),
+        "ai_assistant_usage": _latest_incident_events(assistant_events, limit=5),
+        "forecast_signals": _latest_incident_events(forecast_events, limit=5),
+        "forecast_rows": forecast_rows,
+        "forecast_summary": _forecast_summary(forecast_rows),
         "mcp_metrics": {
             "query_count": sum(int(event.get("mcp_query_count") or 0) for event in metric_events),
             "success_count": sum(int(event.get("mcp_success_count") or 0) for event in metric_events),
@@ -1024,12 +1349,13 @@ def _status_counts(counts: dict[str, int]) -> str:
 
 
 def _action_button(label: str, url: str, disabled: bool = False) -> str:
-    disabled_attr = " disabled" if disabled else ""
     class_attr = f' class="action-{label.lower()}"'
+    if disabled:
+        return f'<span{class_attr} aria-disabled="true">{escape(label)}</span>'
     return (
-        f'<form method="post" action="{escape(url)}" target="_blank">'
-        f'<button type="submit"{class_attr}{disabled_attr}>{escape(label)}</button>'
-        "</form>"
+        f'<a{class_attr} href="{escape(url)}" target="_blank" '
+        f'onclick="const w = window.open(this.href, \'_blank\'); if (w) {{ w.opener = window; }} return false;">'
+        f"{escape(label)}</a>"
     )
 
 
@@ -1071,7 +1397,7 @@ def _render_event_list(events: object, fields: tuple[str, ...], empty: str) -> s
     if not isinstance(events, list) or not events:
         return f"<p>{escape(empty)}</p>"
     rows = []
-    for event in events[:6]:
+    for event in events[:5]:
         if not isinstance(event, dict):
             continue
         title = _event_value(event, "incident_id", "event", "mcp_tool_usage", default="event")
@@ -1086,15 +1412,68 @@ def _render_event_list(events: object, fields: tuple[str, ...], empty: str) -> s
     return f'<ul class="event-list">{"".join(rows)}</ul>' if rows else f"<p>{escape(empty)}</p>"
 
 
-def _table_text_cell(value: object, empty: str = "", preview_chars: int = 130) -> str:
+def _render_forecast_table(summary: object, rows: object, empty: str) -> str:
+    if not isinstance(summary, dict):
+        summary = {}
+    critical = int(summary.get("predicted_critical_incidents", 0) or 0)
+    row_count = len(rows) if isinstance(rows, list) else 0
+    services_at_risk = int(summary.get("services_at_risk", row_count) or row_count)
+    avg_confidence = int(summary.get("avg_forecast_confidence", 0) or 0)
+    summary_html = (
+        '<div class="forecast-summary">'
+        f'<div class="forecast-stat"><strong>{critical}</strong><span>Predicted Critical Incidents</span></div>'
+        f'<div class="forecast-stat"><strong>{services_at_risk}</strong><span>Services At Risk</span></div>'
+        f'<div class="forecast-stat"><strong>{avg_confidence}%</strong><span>Avg Forecast Confidence</span></div>'
+        "</div>"
+    )
+    if not isinstance(rows, list) or not rows:
+        return summary_html + f"<p>{escape(empty)}</p>"
+    table_rows = []
+    for row in rows[:3]:
+        if not isinstance(row, dict):
+            continue
+        service = escape(str(row.get("service") or "unknown"))
+        risk = escape(str(row.get("risk") or "Healthy"))
+        eta = escape(str(row.get("eta") or "-"))
+        confidence_pct = int(row.get("confidence_pct", 0) or 0)
+        risk_class = f"risk-{str(row.get('risk') or 'healthy').lower()}"
+        table_rows.append(
+            "<tr>"
+            f"<td>{service}</td>"
+            f'<td><span class="risk-pill {risk_class}">{risk}</span></td>'
+            f"<td>{eta}</td>"
+            f"<td>{confidence_pct}%</td>"
+            "</tr>"
+        )
+    table = (
+        '<div class="forecast-table-wrap">'
+        "<table class=\"forecast-table\">"
+        "<thead><tr><th>Service</th><th>Risk</th><th>ETA</th><th>Confidence</th></tr></thead>"
+        f"<tbody>{''.join(table_rows)}</tbody>"
+        "</table>"
+        "</div>"
+    )
+    return summary_html + table
+
+
+def _table_text_cell(
+    value: object,
+    empty: str = "",
+    preview_chars: int = 130,
+    *,
+    expandable: bool = True,
+) -> str:
     text = str(value or empty)
-    preview = text if len(text) <= preview_chars else text[:preview_chars].rsplit(" ", 1)[0] + "."
+    if expandable and len(text) > preview_chars:
+        preview = text[:preview_chars].rsplit(" ", 1)[0] + "."
+    else:
+        preview = text
     details = (
         "<details>"
         '<summary>More</summary>'
         f'<div class="cell-full">{escape(text)}</div>'
         "</details>"
-        if len(text) > preview_chars
+        if expandable and len(text) > preview_chars
         else ""
     )
     return (
@@ -1103,6 +1482,48 @@ def _table_text_cell(value: object, empty: str = "", preview_chars: int = 130) -
         f"{details}"
         "</div>"
     )
+
+
+def _incident_table_ai_summary(incident: dict[str, Any]) -> str:
+    ai_summary = str(incident.get("ai_summary") or "").strip()
+    if ai_summary:
+        return ai_summary
+
+    fallback_rca_summary = str(incident.get("fallback_rca_summary") or "").strip()
+    if fallback_rca_summary:
+        return f"AI summary unavailable. {fallback_rca_summary}"
+
+    root_cause = str(incident.get("root_cause") or "").strip()
+    if not root_cause:
+        return ""
+
+    confidence = incident.get("confidence_score")
+    evidence_summary = str(incident.get("evidence_summary") or "").strip()
+    actions = incident.get("recommended_actions") or []
+    if isinstance(actions, list) and actions:
+        action_text = "; ".join(str(item) for item in actions[:2])
+    else:
+        action_text = "No recommended actions captured yet."
+
+    summary = f"AI summary unavailable. RCA fallback: {root_cause}."
+    if confidence is not None:
+        summary += f" Confidence {float(confidence):.2f}."
+    if evidence_summary:
+        summary += f" Evidence: {evidence_summary}"
+    summary += f" Recommended actions: {action_text}"
+    return summary
+
+
+def _incident_report_ai_summary(
+    incident: Incident, triage_summary: str | None = None
+) -> str:
+    if triage_summary:
+        return triage_summary
+    if incident.ai_summary:
+        return incident.ai_summary
+    if incident.fallback_rca_summary:
+        return f"AI summary unavailable. {incident.fallback_rca_summary}"
+    return _format_fallback_rca_summary("Investigation", incident)
 
 
 def _dashboard_page_number(request: Request) -> int:
@@ -1143,19 +1564,7 @@ def _render_dashboard(payload: dict[str, object]) -> str:
         action_urls = incident.get("action_urls", {})
         if not isinstance(action_urls, dict):
             action_urls = {}
-        table_ai_summary = str(incident.get("ai_summary") or "")
-        if table_ai_summary and "Reasoning:" not in table_ai_summary:
-            actions = incident.get("recommended_actions") or []
-            if isinstance(actions, list) and actions:
-                action_text = "; ".join(str(item) for item in actions[:2])
-            else:
-                action_text = "click Investigate for full detail analysis and recommended remediation"
-            table_ai_summary = (
-                f"{table_ai_summary} Reasoning: this summary interprets the evidence rather than repeating it. "
-                f"MCP supplied {incident.get('mcp_log_event_count') or 0} correlated events; "
-                f"confidence is {incident.get('confidence_score') or 0}. "
-                f"Remediation action: {action_text}. Click Investigate for full detail analysis on the incident."
-            )
+        table_ai_summary = _incident_table_ai_summary(incident)
         remediation_class = " remediation open" if remediation_status == "OPEN" else " remediation"
         rows.append(
             "<tr>"
@@ -1168,7 +1577,7 @@ def _render_dashboard(payload: dict[str, object]) -> str:
             f"MCP={escape(str(incident.get('mcp_investigation') or False))}; "
             f"events={escape(str(incident.get('mcp_log_event_count') or 0))}</small></td>"
             f"<td>{_table_text_cell(incident.get('mcp_evidence_summary'), 'No MCP evidence yet', 110)}</td>"
-            f"<td>{_table_text_cell(table_ai_summary, 'No AI summary yet. Click Investigate for full detail analysis on the incident.', 125)}</td>"
+            f"<td>{_table_text_cell(table_ai_summary, 'No AI summary yet. Click Investigate for full detail analysis on the incident.', expandable=False)}</td>"
             f'<td class="actions">'
             f"{_action_button('Investigate', str(action_urls.get('investigate', '')), status == 'CLOSED')}"
             f"{_action_button('Approve', str(action_urls.get('approve', '')), not (can_approve and has_rca))}"
@@ -1220,6 +1629,7 @@ def _render_dashboard(payload: dict[str, object]) -> str:
             "</div>"
             '<div class="actions">'
             f"{_action_button('Investigate', str(action_urls.get('investigate', '')), primary_status == 'CLOSED')}"
+            f"{_action_button('Prepare SPL', str(action_urls.get('assistant', '')), False)}"
             f"{_action_button('Approve', str(action_urls.get('approve', '')), not (can_approve and has_rca))}"
             f"{_action_button('Execute', str(action_urls.get('execute', '')), not can_execute)}"
             f"{_action_button('Reject', str(action_urls.get('reject', '')), not can_reject)}"
@@ -1252,7 +1662,7 @@ def _render_dashboard(payload: dict[str, object]) -> str:
   <meta charset="utf-8">
   <meta http-equiv="refresh" content="15">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Agentic Ops Dashboard</title>
+  <title>Splunk Agentic Ops Incident Copilot</title>
   <style>
     body {{ margin: 0; font-family: Arial, sans-serif; background: #f6f7f9; color: #17202a; }}
     main {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px; }}
@@ -1271,22 +1681,38 @@ def _render_dashboard(payload: dict[str, object]) -> str:
     .event-list li {{ border-bottom: 1px solid #eef1f5; padding-bottom: 8px; }}
     .event-list strong {{ display: block; font-size: 14px; margin-bottom: 3px; }}
     .event-list span, .panel p {{ color: #5f6b7a; font-size: 13px; line-height: 1.35; }}
+    .forecast-summary {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 10px 0 12px; }}
+    .forecast-stat {{ border: 1px solid #d9dee5; border-radius: 8px; background: #f8fafc; padding: 10px 12px; }}
+    .forecast-stat strong {{ display: block; font-size: 20px; line-height: 1.1; color: #17202a; margin-bottom: 4px; }}
+    .forecast-stat span {{ display: block; color: #5f6b7a; font-size: 12px; line-height: 1.25; }}
+    .forecast-table-wrap {{ width: 100%; overflow-x: auto; border: 1px solid #d9dee5; border-radius: 8px; }}
+    .forecast-table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
+    .forecast-table th, .forecast-table td {{ padding: 8px 10px; border-bottom: 1px solid #e5e8ed; text-align: left; font-size: 12px; }}
+    .forecast-table th {{ background: #eef1f5; text-transform: uppercase; letter-spacing: 0.02em; }}
+    .forecast-table th:nth-child(1), .forecast-table td:nth-child(1) {{ width: 34%; }}
+    .forecast-table th:nth-child(2), .forecast-table td:nth-child(2) {{ width: 22%; }}
+    .forecast-table th:nth-child(3), .forecast-table td:nth-child(3) {{ width: 22%; }}
+    .forecast-table th:nth-child(4), .forecast-table td:nth-child(4) {{ width: 22%; }}
+    .risk-pill {{ display: inline-block; border-radius: 999px; padding: 3px 8px; font-weight: 700; }}
+    .risk-critical {{ background: #fee2e2; color: #991b1b; }}
+    .risk-high {{ background: #fef3c7; color: #92400e; }}
+    .risk-healthy {{ background: #dcfce7; color: #166534; }}
     .incident-toolbar {{ display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: center; background: #fff; border: 1px solid #d9dee5; border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }}
     .incident-toolbar__label {{ font-weight: 700; color: #17202a; }}
     .pagination {{ display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: center; margin: 0 0 10px; color: #5f6b7a; font-size: 13px; }}
     .page-link {{ color: #1f6feb; text-decoration: none; font-weight: 700; }}
     .page-link.disabled {{ color: #97a1af; pointer-events: none; }}
-    .table-wrap {{ width: 100%; overflow-x: hidden; resize: horizontal; min-width: 720px; max-width: 100%; border: 1px solid #d9dee5; background: #fff; }}
+    .table-wrap {{ width: 100%; overflow-x: hidden; max-width: 100%; border: 1px solid #d9dee5; background: #fff; }}
     table {{ width: 100%; border-collapse: collapse; table-layout: fixed; background: #fff; }}
-    th, td {{ padding: 8px 10px; border-bottom: 1px solid #e5e8ed; text-align: left; vertical-align: top; font-size: 13px; }}
-    th {{ background: #eef1f5; font-size: 13px; text-transform: uppercase; resize: horizontal; overflow: auto; min-width: 72px; }}
-    th:nth-child(1), td:nth-child(1) {{ width: 13%; }}
-    th:nth-child(2), td:nth-child(2) {{ width: 9%; }}
+    th, td {{ padding: 7px 9px; border-bottom: 1px solid #e5e8ed; text-align: left; vertical-align: top; font-size: 12px; word-break: break-word; overflow-wrap: anywhere; }}
+    th {{ background: #eef1f5; font-size: 12px; text-transform: uppercase; white-space: normal; }}
+    th:nth-child(1), td:nth-child(1) {{ width: 12%; }}
+    th:nth-child(2), td:nth-child(2) {{ width: 10%; }}
     th:nth-child(3), td:nth-child(3) {{ width: 8%; }}
-    th:nth-child(4), td:nth-child(4) {{ width: 11%; }}
-    th:nth-child(5), td:nth-child(5) {{ width: 16%; }}
-    th:nth-child(6), td:nth-child(6) {{ width: 16%; }}
-    th:nth-child(7), td:nth-child(7) {{ width: 17%; }}
+    th:nth-child(4), td:nth-child(4) {{ width: 10%; }}
+    th:nth-child(5), td:nth-child(5) {{ width: 15%; }}
+    th:nth-child(6), td:nth-child(6) {{ width: 15%; }}
+    th:nth-child(7), td:nth-child(7) {{ width: 20%; }}
     th:nth-child(8), td:nth-child(8) {{ width: 10%; }}
     td:nth-child(5) small {{ color: #5f6b7a; font-size: 12px; line-height: 1.2; }}
     .cell-text {{ overflow-wrap: anywhere; line-height: 1.3; }}
@@ -1298,28 +1724,34 @@ def _render_dashboard(payload: dict[str, object]) -> str:
     .status-pill, .severity-pill {{ display: inline-block; max-width: 100%; border-radius: 4px; padding: 3px 6px; background: #eef1f5; color: #17202a; font-weight: 700; font-size: 12px; line-height: 1.2; overflow-wrap: anywhere; }}
     .status-pill.remediation {{ background: #f4f1e8; }}
     .status-pill.remediation.open {{ font-weight: 900; color: #7a3e00; border: 1px solid #f2c36b; }}
-    form {{ margin: 0; }}
-    button {{ appearance: none; border: 1px solid #1f6feb; background: #1f6feb; color: #fff; border-radius: 6px; padding: 6px 8px; cursor: pointer; white-space: nowrap; font-size: 12px; }}
-    button.action-close {{ border-color: #0f766e; background: #e6fffb; color: #134e4a; font-weight: 700; }}
-    button:disabled {{ border-color: #c2c8d0; background: #e1e5ea; color: #6b7280; cursor: default; }}
-    button.action-close:disabled {{ border-color: #99cfc8; background: #f0fffc; color: #4b807a; }}
+    .actions a, .actions span {{ appearance: none; border: 1px solid #1f6feb; background: #1f6feb; color: #fff; border-radius: 6px; padding: 5px 7px; cursor: pointer; white-space: nowrap; font-size: 11px; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }}
+    .actions a.action-close {{ border-color: #0f766e; background: #e6fffb; color: #134e4a; font-weight: 700; }}
+    .actions span {{ border-color: #c2c8d0; background: #e1e5ea; color: #6b7280; cursor: default; }}
+    .actions span.action-close {{ border-color: #99cfc8; background: #f0fffc; color: #4b807a; }}
     @media (max-width: 760px) {{
       .summary {{ grid-template-columns: 1fr; }}
       .panel-grid {{ grid-template-columns: 1fr; }}
-      .table-wrap {{ min-width: 100%; }}
+      .table-wrap {{ overflow-x: hidden; }}
+      .actions {{ flex-direction: column; align-items: stretch; }}
+      .actions a, .actions span {{ width: 100%; }}
+      .forecast-summary {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
 <body>
   <main>
     <div class="page-head">
-      <h1>Agentic Ops Dashboard</h1>
+      <h1>Splunk Agentic Ops Incident Copilot</h1>
       <div class="updated">Last updated {last_updated}</div>
     </div>
     <section class="summary">
       <div class="metric"><strong>{payload.get("total_incidents", 0)}</strong>Total incidents</div>
       <div class="metric"><strong>Status</strong>{status_text}</div>
       <div class="metric"><strong>Severity</strong>{severity_text}</div>
+    </section>
+    <section class="panel" style="margin-bottom:22px;">
+      <h2>Common Services</h2>
+      <p>Representative service groups in this demo are checkout, payment, and auth, which match the main incident flows and dashboard filters.</p>
     </section>
     <section class="panel-grid">
       <div class="panel"><h2>Noise Reduction</h2><p>Filters routine successful low-latency events before RCA. Signal remains when HTTP status is 500 or higher, error_type is present, or latency reaches 1000 ms.</p>{_render_counts(noise)}</div>
@@ -1332,6 +1764,8 @@ def _render_dashboard(payload: dict[str, object]) -> str:
       <div class="panel"><h2>Confidence Scores</h2>{_render_event_list(payload.get("confidence_scores"), ("service", "root_cause", "confidence_score"), "No confidence scores yet.")}</div>
       <div class="panel"><h2>Investigation Source</h2>{_render_counts(payload.get("investigation_source"))}</div>
       <div class="panel"><h2>MCP Metrics</h2>{_render_counts(mcp_metrics)}</div>
+      <div class="panel"><h2>AI Assistant Usage</h2><p>Prepared prompts and SPL suggestions for Splunk AI Assistant live query tuning.</p>{_render_event_list(payload.get("ai_assistant_usage"), ("service", "intent", "prompt", "suggested_spl"), "No AI Assistant prompts yet.")}</div>
+      <div class="panel"><h2>Hosted Time Series Forecast</h2><p>Forecast-ready signals for a hosted time-series model or fallback forecast pipeline.</p>{_render_forecast_table(payload.get("forecast_summary"), payload.get("forecast_rows"), "No forecast signals yet.")}</div>
     </section>
     {action_toolbar}
     {pagination}
@@ -1351,15 +1785,17 @@ def _render_dashboard(payload: dict[str, object]) -> str:
 
 
 def _render_action_result(action: str, incident: Incident) -> HTMLResponse:
+    triage_summary = _latest_ai_summary_for_incident(incident.incident_id)
+    triage_mcp_summary = _latest_mcp_evidence_summary_for_incident(incident.incident_id)
     root_cause = incident.root_cause or "Pending"
     evidence_summary = incident.evidence_summary or _fallback_mcp_summary(
         incident.incident_id
     )
-    ai_summary = (
-        incident.ai_summary or incident.evidence_summary or "No AI summary available."
-    )
+    ai_summary = _incident_report_ai_summary(incident, triage_summary)
     mcp_evidence_summary = (
-        incident.mcp_evidence_summary or "No MCP evidence summary available."
+        triage_mcp_summary
+        or incident.mcp_evidence_summary
+        or "No MCP evidence summary available."
     )
     mcp_tools = ", ".join(incident.mcp_tools_used) or "None"
     spl_queries = "; ".join(incident.spl_queries_used) or "None"
@@ -1373,9 +1809,31 @@ def _render_action_result(action: str, incident: Incident) -> HTMLResponse:
         )
         or "<li>None</li>"
     )
+    executed_actions = (
+        "".join(f"<li>{escape(item)}</li>" for item in incident.safe_remediation_actions)
+        or "<li>No remediation actions were executed.</li>"
+    )
+    remediation_executed = (
+        "Yes"
+        if incident.status in {"EXECUTED", "CLOSED"}
+        or str(incident.remediation_status or "") in {"Remediation Executed", "TICKET CLOSED"}
+        else "No"
+    )
+    remediation_executed_row = (
+        f"<dt>Remediation executed</dt><dd>{escape(remediation_executed)}</dd>"
+        if action in {"Execution", "Close"}
+        else ""
+    )
+    execution_summary = (
+        f"<h2>Execution summary</h2><ul>{executed_actions}</ul>"
+        if action in {"Execution", "Close"}
+        else ""
+    )
     title = f"{escape(action)} completed"
-    if action == "Investigation" and not incident.mcp_evidence_summary:
-        title = "Investigation started"
+    if action == "Execution":
+        title = "Actions executed"
+    elif action == "Close":
+        title = "Ticket closed"
     html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1395,11 +1853,7 @@ def _render_action_result(action: str, incident: Incident) -> HTMLResponse:
   <script>
     window.addEventListener("load", function () {{
       if (window.opener && !window.opener.closed) {{
-        setTimeout(function () {{
-          try {{
-            window.opener.location.reload();
-          }} catch (error) {{}}
-        }}, 1500);
+        window.opener.location.reload();
       }}
     }});
   </script>
@@ -1424,12 +1878,192 @@ def _render_action_result(action: str, incident: Incident) -> HTMLResponse:
         <dt>AI summary</dt><dd>{escape(ai_summary)}</dd>
         <dt>Evidence</dt><dd>{escape(evidence_summary)}</dd>
         <dt>MCP evidence</dt><dd>{escape(mcp_evidence_summary)}</dd>
+        {remediation_executed_row}
       </dl>
       <h2>Recommended actions</h2>
       <ul>{recommended_actions}</ul>
       <h2>Safe remediation actions</h2>
       <ul>{safe_actions}</ul>
+      {execution_summary}
       <p><a href="/dashboard">Open FastAPI dashboard</a></p>
+    </div>
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(html)
+
+
+def _render_assistant_result(
+    incident: Incident,
+    suggestion: AssistantSuggestion,
+    forecast: ForecastSignal,
+) -> HTMLResponse:
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Assistant Ready</title>
+  <style>
+    body {{ margin: 0; font-family: Arial, sans-serif; background: #f6f7f9; color: #17202a; }}
+    main {{ max-width: 980px; margin: 0 auto; padding: 28px 20px; }}
+    .panel {{ background: #fff; border: 1px solid #d9dee5; border-radius: 8px; padding: 18px; }}
+    h1 {{ font-size: 24px; margin: 0 0 14px; }}
+    h2 {{ margin-top: 18px; font-size: 16px; }}
+    pre {{ white-space: pre-wrap; word-break: break-word; background: #f8fafc; border: 1px solid #e5e8ed; padding: 12px; border-radius: 6px; }}
+    code {{ white-space: pre-wrap; }}
+    dl {{ display: grid; grid-template-columns: 180px 1fr; gap: 8px 12px; }}
+    dt {{ font-weight: 700; }}
+    dd {{ margin: 0; }}
+  </style>
+  <script>
+    window.addEventListener("load", function () {{}});
+  </script>
+</head>
+<body>
+  <main>
+    <div class="panel">
+      <h1>AI Assistant Prepared</h1>
+      <dl>
+        <dt>Incident</dt><dd>{escape(incident.incident_id)}</dd>
+        <dt>Service</dt><dd>{escape(incident.service)}</dd>
+        <dt>Assistant status</dt><dd>{escape(suggestion.status)}</dd>
+        <dt>Forecast model</dt><dd>{escape(forecast.model_name)}</dd>
+        <dt>Forecast source</dt><dd>{escape(forecast.model_source)}</dd>
+        <dt>Forecast latency</dt><dd>{forecast.predicted_latency_ms} ms</dd>
+        <dt>Forecast confidence</dt><dd>{forecast.confidence_score}</dd>
+      </dl>
+      <h2>Prompt</h2>
+      <pre>{escape(suggestion.prompt)}</pre>
+      <h2>Suggested SPL</h2>
+      <pre>{escape(suggestion.suggested_spl)}</pre>
+      <h2>Explanation</h2>
+      <p>{escape(suggestion.explanation)}</p>
+      <h2>Hosted time series query</h2>
+      <pre>{escape(forecast.hosted_model_query or "")}</pre>
+      <p><a href="/dashboard">Open FastAPI dashboard</a></p>
+    </div>
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(html)
+
+
+def _render_investigation_queued(
+    incident: Incident, report_url: str
+) -> HTMLResponse:
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Investigation Queued</title>
+  <style>
+    body {{ margin: 0; font-family: Arial, sans-serif; background: #f6f7f9; color: #17202a; }}
+    main {{ max-width: 900px; margin: 0 auto; padding: 28px 20px; }}
+    .panel {{ background: #fff; border: 1px solid #d9dee5; border-radius: 8px; padding: 18px; }}
+    h1 {{ font-size: 24px; margin: 0 0 14px; }}
+    p {{ line-height: 1.5; color: #334155; }}
+    a {{ color: #1f6feb; }}
+    .meta {{ color: #5f6b7a; font-size: 13px; }}
+  </style>
+  <script>
+    window.addEventListener("load", function () {{
+    }});
+  </script>
+</head>
+<body>
+  <main>
+    <div class="panel">
+      <h1>Investigation queued</h1>
+      <p><strong>Investigation completed</strong> pages are generated once the backend finishes the RCA pass and refresh this window.</p>
+      <p>This report summarizes the MCP evidence collected for the incident and the resulting RCA output.</p>
+      <p>The report for incident <strong>{escape(incident.incident_id)}</strong> is being generated in the background.</p>
+      <p class="meta">Service: {escape(incident.service)} | Status: {escape(incident.status)}</p>
+      <p>You can keep this tab open. It will open the report automatically when ready.</p>
+      <p><a href="{escape(report_url)}">Open report</a>.</p>
+    </div>
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(html)
+
+
+def _render_investigation_report(
+    incident: Incident,
+    report_url: str,
+) -> HTMLResponse:
+    triage_summary = _latest_ai_summary_for_incident(incident.incident_id)
+    triage_mcp_summary = _latest_mcp_evidence_summary_for_incident(incident.incident_id)
+    evidence_summary = incident.evidence_summary or _fallback_mcp_summary(
+        incident.incident_id
+    )
+    ai_summary = _incident_report_ai_summary(incident, triage_summary)
+    mcp_evidence_summary = (
+        triage_mcp_summary
+        or incident.mcp_evidence_summary
+        or "Pending investigation / no MCP evidence yet."
+    )
+    mcp_tools = ", ".join(incident.mcp_tools_used) or "None"
+    spl_queries = "; ".join(incident.spl_queries_used) or "None"
+    recommended_actions = (
+        "".join(f"<li>{escape(item)}</li>" for item in incident.recommended_actions)
+        or "<li>None</li>"
+    )
+    safe_actions = (
+        "".join(
+            f"<li>{escape(item)}</li>" for item in incident.safe_remediation_actions
+        )
+        or "<li>None</li>"
+    )
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Investigation Report</title>
+  <style>
+    body {{ margin: 0; font-family: Arial, sans-serif; background: #f6f7f9; color: #17202a; }}
+    main {{ max-width: 980px; margin: 0 auto; padding: 28px 20px; }}
+    .panel {{ background: #fff; border: 1px solid #d9dee5; border-radius: 8px; padding: 18px; }}
+    h1 {{ font-size: 24px; margin: 0 0 14px; }}
+    h2 {{ font-size: 16px; margin: 18px 0 10px; }}
+    p, li {{ line-height: 1.5; color: #334155; }}
+    a {{ color: #1f6feb; }}
+    dl {{ display: grid; grid-template-columns: 180px 1fr; gap: 8px 12px; }}
+    dt {{ font-weight: 700; }}
+    pre {{ white-space: pre-wrap; word-break: break-word; background: #f8fafc; border: 1px solid #e5e8ed; padding: 12px; border-radius: 8px; }}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="panel">
+      <h1>Investigation Report</h1>
+      <dl>
+        <dt>Incident</dt><dd>{escape(incident.incident_id)}</dd>
+        <dt>Service</dt><dd>{escape(incident.service)}</dd>
+        <dt>Status</dt><dd>{escape(incident.status)}</dd>
+        <dt>Severity</dt><dd>{escape(incident.severity)}</dd>
+        <dt>Root cause</dt><dd>{escape(str(incident.root_cause or "Pending investigation"))}</dd>
+        <dt>Confidence</dt><dd>{incident.confidence_score if incident.confidence_score is not None else "Pending"}</dd>
+        <dt>Remediation status</dt><dd>{escape(str(incident.remediation_status or "Pending"))}</dd>
+        <dt>LLM provider</dt><dd>{escape(str(incident.llm_provider or "Pending"))}</dd>
+        <dt>MCP investigation</dt><dd>{escape(str(incident.mcp_investigation))}</dd>
+        <dt>MCP tools used</dt><dd>{escape(mcp_tools)}</dd>
+        <dt>MCP log events</dt><dd>{incident.mcp_log_event_count}</dd>
+        <dt>SPL queries used</dt><dd>{escape(spl_queries)}</dd>
+      </dl>
+      <h2>AI Summary</h2>
+      <pre>{escape(ai_summary)}</pre>
+      <h2>Evidence Summary</h2>
+      <pre>{escape(evidence_summary)}</pre>
+      <h2>MCP Evidence Summary</h2>
+      <pre>{escape(mcp_evidence_summary)}</pre>
+      <h2>Recommended actions</h2>
+      <ul>{recommended_actions}</ul>
+      <h2>Safe remediation actions</h2>
+      <ul>{safe_actions}</ul>
+      <p><a href="{escape(report_url)}">Refresh report</a>.</p>
     </div>
   </main>
 </body>
@@ -1504,6 +2138,7 @@ async def _finalize_investigation_state(incident_id: str) -> None:
             source="splunk_mcp_evidence",
         )
         await _record_splunk_ai_assistant_activity(mcp_client, incident, mcp_evidence)
+        _record_forecast_signal(incident, mcp_evidence)
 
         codex_result = await asyncio.to_thread(
             _maybe_codex_enhancement,
@@ -1560,30 +2195,17 @@ async def _finalize_investigation_state(incident_id: str) -> None:
             source="fallback_evidence",
         )
         await _record_splunk_ai_assistant_activity(mcp_client, incident, evidence)
+        _record_forecast_signal(incident, evidence)
 
     upsert_incident(incident)
     write_incident_event(
-        {
-            "timestamp": _timestamp(),
-            "incident_id": incident.incident_id,
-            "service": incident.service,
-            "status": incident.status,
-            "severity": incident.severity,
-            "root_cause": incident.root_cause,
-            "confidence_score": incident.confidence_score,
-            "approved_by": incident.approved_by,
-            "remediation_result": incident.remediation_result,
-            "evidence_summary": incident.evidence_summary,
-            "mcp_evidence_summary": incident.mcp_evidence_summary,
-            "mcp_investigation": incident.mcp_investigation,
-            "mcp_tools_used": incident.mcp_tools_used,
-            "spl_queries_used": incident.spl_queries_used,
-            "mcp_log_event_count": incident.mcp_log_event_count,
-            "incident_status": incident.status,
-            "investigation_status": "COMPLETED",
-            "action": "investigation_completed",
-            "sourcetype": "aiops-incidents",
-        }
+        _incident_event_record(
+            incident,
+            incident_status=incident.status,
+            investigation_status="COMPLETED",
+            action="investigation_completed",
+            sourcetype="aiops-incidents",
+        )
     )
     _write_timeline(
         incident,
@@ -1607,9 +2229,7 @@ async def _finalize_investigation_state(incident_id: str) -> None:
         extra={"fallback_reason": fallback_reason} if fallback_reason else None,
     )
 
-    ai_summary = incident.ai_summary or _format_ai_summary(
-        incident.incident_id, incident
-    )
+    ai_summary = _incident_report_ai_summary(incident)
     hec_status = await save_ai_summary_to_splunk(
         summary_text=ai_summary,
         host=incident.service,
@@ -1655,16 +2275,12 @@ async def _load_or_hydrate_incident(
     )
     upsert_incident(incident)
     write_incident_event(
-        {
-            "timestamp": _timestamp(),
-            "incident_id": incident.incident_id,
-            "service": incident.service,
-            "status": incident.status,
-            "severity": incident.severity,
-            "incident_status": incident.status,
-            "action": "incident_hydrated",
-            "sourcetype": "aiops-incidents",
-        }
+        _incident_event_record(
+            incident,
+            incident_status=incident.status,
+            action="incident_hydrated",
+            sourcetype="aiops-incidents",
+        )
     )
     _write_timeline(incident, "incident_hydrated")
     return incident, evidence
@@ -1674,19 +2290,33 @@ async def _start_investigation_state(incident_id: str) -> Incident:
     incident, hydrated_evidence = await _load_or_hydrate_incident(incident_id)
 
     incident.status = "INVESTIGATED"
+    incident.remediation_status = "INVESTIGATED"
+    incident.ai_summary = None
+    incident.fallback_rca_summary = None
     incident.updated_at = utc_now()
     upsert_incident(incident)
     write_incident_event(
+        _incident_event_record(
+            incident,
+            incident_status=incident.status,
+            remediation_status=incident.remediation_status,
+            investigation_status="STARTED",
+            action="investigation_started",
+            sourcetype="aiops-incidents",
+        )
+    )
+    write_remediation_event(
         {
             "timestamp": _timestamp(),
             "incident_id": incident.incident_id,
             "service": incident.service,
             "status": incident.status,
             "severity": incident.severity,
-            "incident_status": incident.status,
-            "investigation_status": "STARTED",
+            "remediation_status": incident.remediation_status,
             "action": "investigation_started",
-            "sourcetype": "aiops-incidents",
+            "mode": "simulate",
+            "result": "Investigation in progress",
+            "sourcetype": "aiops-remediation",
         }
     )
     _write_timeline(incident, "investigation_started")
@@ -1700,6 +2330,27 @@ async def _investigate_incident_state(incident_id: str) -> Incident:
 
     await _finalize_investigation_state(incident.incident_id)
     return load_incidents().get(incident_id) or incident
+
+
+async def _prepare_ai_assistant_state(
+    incident_id: str,
+) -> tuple[Incident, AssistantSuggestion, ForecastSignal]:
+    incident, hydrated_evidence = await _load_or_hydrate_incident(incident_id)
+    mcp_client = SplunkMCPClient()
+    evidence = hydrated_evidence
+    if not evidence:
+        try:
+            evidence = await mcp_client.query_incident_evidence(
+                incident.incident_id, incident.service
+            )
+        except Exception:
+            evidence = None
+    if evidence is None:
+        evidence = _fallback_evidence(incident)
+
+    suggestion = await _record_splunk_ai_assistant_activity(mcp_client, incident, evidence)
+    forecast = _record_forecast_signal(incident, evidence)
+    return incident, suggestion, forecast
 
 
 @app.get("/health")
@@ -1722,17 +2373,12 @@ def create_incident(request: CreateIncidentRequest) -> Incident:
     )
     upsert_incident(incident)
     write_incident_event(
-        {
-            "timestamp": _timestamp(),
-            "incident_id": incident.incident_id,
-            "service": incident.service,
-            "status": incident.status,
-            "severity": incident.severity,
-            "approved_by": incident.approved_by,
-            "incident_status": incident.status,
-            "action": "incident_created",
-            "sourcetype": "aiops-incidents",
-        }
+        _incident_event_record(
+            incident,
+            incident_status=incident.status,
+            action="incident_created",
+            sourcetype="aiops-incidents",
+        )
     )
     write_remediation_event(
         {
@@ -1785,21 +2431,17 @@ async def handle_splunk_alert(alert: SplunkAlertRequest) -> dict[str, object]:
     incident.updated_at = utc_now()
     upsert_incident(incident)
     write_incident_event(
-        {
-            "timestamp": _timestamp(),
-            "incident_id": incident.incident_id,
-            "service": incident.service,
-            "status": incident.status,
-            "severity": incident.severity,
-            "incident_status": incident.status,
-            "action": "splunk_webhook_received",
-            "alert_name": search_name,
-            "host": failing_host,
-            "trigger_time": _alert_field(
+        _incident_event_record(
+            incident,
+            incident_status=incident.status,
+            action="splunk_webhook_received",
+            alert_name=search_name,
+            host=failing_host,
+            trigger_time=_alert_field(
                 alert_payload, "unknown", "trigger_time", "triggered_time", "time"
             ),
-            "sourcetype": "aiops-incidents",
-        }
+            sourcetype="aiops-incidents",
+        )
     )
 
     mcp_client = SplunkMCPClient()
@@ -1874,6 +2516,7 @@ async def handle_splunk_alert(alert: SplunkAlertRequest) -> dict[str, object]:
         source=evidence_source,
     )
     await _record_splunk_ai_assistant_activity(mcp_client, incident, evidence)
+    _record_forecast_signal(incident, evidence)
 
     enhanced_result = await asyncio.to_thread(
         _maybe_codex_enhancement,
@@ -1900,7 +2543,7 @@ async def handle_splunk_alert(alert: SplunkAlertRequest) -> dict[str, object]:
                 incident.mcp_tools_used.insert(0, "splunk_run_query")
     upsert_incident(incident)
 
-    ai_summary = incident.ai_summary or _format_ai_summary(search_name, incident)
+    ai_summary = _incident_report_ai_summary(incident)
     hec_status = await save_ai_summary_to_splunk(
         summary_text=ai_summary,
         host=failing_host,
@@ -1910,23 +2553,9 @@ async def handle_splunk_alert(alert: SplunkAlertRequest) -> dict[str, object]:
     )
 
     common_record = {
-        "timestamp": _timestamp(),
-        "incident_id": incident.incident_id,
-        "service": incident.service,
-        "status": incident.status,
-        "severity": incident.severity,
-        "root_cause": incident.root_cause,
-        "confidence_score": incident.confidence_score,
-        "evidence_summary": incident.evidence_summary,
-        "ai_summary": incident.ai_summary,
-        "llm_provider": incident.llm_provider,
-        "mcp_evidence_summary": incident.mcp_evidence_summary,
+        **_incident_event_base(incident),
         "alert_name": search_name,
         "host": failing_host,
-        "mcp_investigation": incident.mcp_investigation,
-        "mcp_tools_used": incident.mcp_tools_used,
-        "spl_queries_used": incident.spl_queries_used,
-        "mcp_log_event_count": incident.mcp_log_event_count,
         "llm_raw_response": (result.raw_response or "")[:2000] or None,
     }
     write_incident_event(
@@ -1995,24 +2624,79 @@ def get_incident(incident_id: str) -> Incident:
 
 @app.post("/incidents/{incident_id}/investigate", response_model=Incident)
 async def investigate_incident(
-    incident_id: str, request: Request, background_tasks: BackgroundTasks
+    incident_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    refresh: bool = True,
 ) -> Incident | RedirectResponse:
+    if refresh:
+        incident = await _investigate_incident_state(incident_id)
+    else:
+        incident = load_incidents().get(incident_id)
+        if not incident:
+            raise HTTPException(status_code=404, detail="Incident not found")
     if _wants_html(request):
-        incident = await _start_investigation_state(incident_id)
-        background_tasks.add_task(_finalize_investigation_state, incident.incident_id)
         return RedirectResponse(url="/dashboard", status_code=303)
-    incident = await _investigate_incident_state(incident_id)
     return incident
 
 
 @app.get("/incidents/{incident_id}/investigate", response_model=None)
 async def investigate_incident_link(
-    incident_id: str, request: Request, background_tasks: BackgroundTasks
+    incident_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    refresh: bool = True,
 ) -> Incident | HTMLResponse:
-    incident = await _investigate_incident_state(incident_id)
+    incident = (
+        await _investigate_incident_state(incident_id)
+        if refresh
+        else load_incidents().get(incident_id)
+    )
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
     if _wants_html(request):
         return _render_action_result("Investigation", incident)
     return incident
+
+
+@app.get("/incidents/{incident_id}/investigate/report", response_model=None)
+async def investigate_incident_report(
+    incident_id: str, request: Request, refresh: bool = False
+) -> HTMLResponse:
+    if refresh:
+        await _investigate_incident_state(incident_id)
+    incident = load_incidents().get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    if incident.root_cause and incident.confidence_score is not None:
+        report_url = str(request.url_for("investigate_incident_report", incident_id=incident_id))
+        return _render_investigation_report(incident, report_url)
+    report_url = str(request.url_for("investigate_incident_report", incident_id=incident_id))
+    return _render_investigation_queued(incident, report_url)
+
+
+@app.get("/incidents/{incident_id}/assistant", response_model=None)
+@app.post("/incidents/{incident_id}/assistant", response_model=None)
+async def prepare_ai_assistant(
+    incident_id: str, request: Request
+) -> dict[str, object] | HTMLResponse:
+    incident, suggestion, forecast = await _prepare_ai_assistant_state(incident_id)
+    payload = {
+        "status": "assistant_prepared",
+        "incident_id": incident.incident_id,
+        "service": incident.service,
+        "assistant_status": suggestion.status,
+        "intent": suggestion.intent,
+        "prompt": suggestion.prompt,
+        "suggested_spl": suggestion.suggested_spl,
+        "forecast_model": forecast.model_name,
+        "forecast_source": forecast.model_source,
+        "forecast_latency_ms": forecast.predicted_latency_ms,
+        "forecast_confidence": forecast.confidence_score,
+    }
+    if _wants_html(request):
+        return _render_assistant_result(incident, suggestion, forecast)
+    return payload
 
 
 @app.post("/incidents/{incident_id}/approve", response_model=Incident)
@@ -2048,12 +2732,14 @@ def approve_incident(
 def approve_incident_link(
     incident_id: str, request: Request
 ) -> Incident | HTMLResponse:
-    incident = approve_incident(incident_id, request)
-    if isinstance(incident, RedirectResponse):
-        incident = load_incidents()[incident_id]
+    result = approve_incident(incident_id, request)
+    if isinstance(result, HTMLResponse):
+        return result
+    if isinstance(result, RedirectResponse):
+        result = load_incidents()[incident_id]
     if _wants_html(request):
-        return _render_action_result("Approval", incident)
-    return incident
+        return _render_action_result("Approval", result)
+    return result
 
 
 @app.post("/incidents/{incident_id}/reject", response_model=Incident)
@@ -2083,12 +2769,14 @@ def reject_remediation(
 def reject_remediation_link(
     incident_id: str, request: Request
 ) -> Incident | HTMLResponse:
-    incident = reject_remediation(incident_id, request)
-    if isinstance(incident, RedirectResponse):
-        incident = load_incidents()[incident_id]
+    result = reject_remediation(incident_id, request)
+    if isinstance(result, HTMLResponse):
+        return result
+    if isinstance(result, RedirectResponse):
+        result = load_incidents()[incident_id]
     if _wants_html(request):
-        return _render_action_result("Rejection", incident)
-    return incident
+        return _render_action_result("Rejection", result)
+    return result
 
 
 @app.post("/incidents/{incident_id}/execute", response_model=Incident)
@@ -2098,7 +2786,17 @@ def execute_remediation(
     incident = load_incidents().get(incident_id)
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "APPROVED":
+    remediation_event = _latest_remediation_event(incident_id)
+    approved_states = {"APPROVED"}
+    approved_remediation_status = (
+        remediation_event is not None
+        and str(remediation_event.get("remediation_status") or "") in approved_states
+    )
+    if (
+        incident.status != "APPROVED"
+        and incident.remediation_status not in approved_states
+        and not approved_remediation_status
+    ):
         raise HTTPException(
             status_code=409, detail="Incident must be approved before execution"
         )
@@ -2111,7 +2809,7 @@ def execute_remediation(
     _apply_remediation_outcome(
         incident,
         status="EXECUTED",
-        remediation_status="Remediation Executed",
+        remediation_status="EXECUTED",
         action="remediation_executed",
         result=f"Executed simulation action: {action}",
         approved_by=incident.approved_by,
@@ -2125,12 +2823,14 @@ def execute_remediation(
 def execute_remediation_link(
     incident_id: str, request: Request
 ) -> Incident | HTMLResponse:
-    incident = execute_remediation(incident_id, request)
-    if isinstance(incident, RedirectResponse):
-        incident = load_incidents()[incident_id]
+    result = execute_remediation(incident_id, request)
+    if isinstance(result, HTMLResponse):
+        return result
+    if isinstance(result, RedirectResponse):
+        result = load_incidents()[incident_id]
     if _wants_html(request):
-        return _render_action_result("Execution", incident)
-    return incident
+        return _render_action_result("Execution", result)
+    return result
 
 
 @app.post("/incidents/{incident_id}/close", response_model=Incident)
@@ -2138,7 +2838,17 @@ def close_incident(incident_id: str, request: Request) -> Incident | RedirectRes
     incident = load_incidents().get(incident_id)
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status not in {"EXECUTED", "CLOSED"}:
+    remediation_event = _latest_remediation_event(incident_id)
+    executed_states = {"EXECUTED", "Remediation Executed", "TICKET CLOSED"}
+    executed_remediation_status = (
+        remediation_event is not None
+        and str(remediation_event.get("remediation_status") or "") in executed_states
+    )
+    if (
+        incident.status not in {"EXECUTED", "CLOSED"}
+        and incident.remediation_status not in executed_states
+        and not executed_remediation_status
+    ):
         raise HTTPException(
             status_code=409, detail="Incident must be executed before closure"
         )
@@ -2146,7 +2856,7 @@ def close_incident(incident_id: str, request: Request) -> Incident | RedirectRes
     _apply_remediation_outcome(
         incident,
         status="CLOSED",
-        remediation_status="TICKET CLOSED",
+        remediation_status="CLOSED",
         action="ticket_closed",
         result=incident.remediation_result or "Ticket closed by operator",
         approved_by=incident.approved_by,
@@ -2158,12 +2868,14 @@ def close_incident(incident_id: str, request: Request) -> Incident | RedirectRes
 
 @app.get("/incidents/{incident_id}/close", response_model=None)
 def close_incident_link(incident_id: str, request: Request) -> Incident | HTMLResponse:
-    incident = close_incident(incident_id, request)
-    if isinstance(incident, RedirectResponse):
-        incident = load_incidents()[incident_id]
+    result = close_incident(incident_id, request)
+    if isinstance(result, HTMLResponse):
+        return result
+    if isinstance(result, RedirectResponse):
+        result = load_incidents()[incident_id]
     if _wants_html(request):
-        return _render_action_result("Close", incident)
-    return incident
+        return _render_action_result("Close", result)
+    return result
 
 
 @app.get("/dashboard", response_model=None)

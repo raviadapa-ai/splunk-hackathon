@@ -1,0 +1,97 @@
+[agentic-ops]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35
+
+[aiops-investigations]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35
+
+[aiops-incidents]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35
+
+[aiops-remediation]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35
+
+[ai-mcp-triage-agent]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35
+
+[aiops-system-health]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35
+
+[aiops-index-health]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35
+
+[aiops-metadata]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35
+
+[aiops-correlation]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35
+
+[aiops-timeline]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35
+
+[aiops-mcp-metrics]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35
+
+[aiops-splunk-ai-activity]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35
+
+[aiops-ai-assistant]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35
+
+[aiops-forecast]
+SHOULD_LINEMERGE = false
+KV_MODE = json
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%:z
+MAX_TIMESTAMP_LOOKAHEAD = 35

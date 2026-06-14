@@ -1,0 +1,4 @@
+index=main sourcetype="agentic-ops"
+| bin _time span=1m
+| stats avg(latency_ms) as avg_latency stdev(latency_ms) as std_latency p95(latency_ms) as p95_latency by _time service
+

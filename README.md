@@ -591,38 +591,9 @@ In this repo those helpers are optional. The app still works when Splunk AI Assi
 - `requirements.txt` runtime dependencies
 - `.env.example` environment template
 
-## Quick Start
+## Setup And Run
 
-This is the shortest path for someone who just cloned the repo and wants to try it locally.
-
-1. Clone the repository.
-2. Copy `.env.example` to `.env`.
-3. Fill in the values for the local Splunk MCP endpoint and any HEC or Codex settings you want to use.
-4. Install the Python dependencies from `requirements.txt`.
-5. Start the app with `.\run_all.ps1`.
-6. Open `http://127.0.0.1:8002/dashboard`.
-7. Optionally generate telemetry with `python -m scripts.run_generator --demo-timeline --overwrite`.
-
-The startup script uses a local `.venv` if it exists. If not, it falls back to `py -3.12`.
-
-## Local Run
-
-1. Copy `.env.example` to `.env` and set any local values you need.
-2. Install the dependencies from `requirements.txt`.
-3. Run `.\run_all.ps1`.
-4. Open the FastAPI dashboard at `http://127.0.0.1:8002/dashboard`.
-5. Generate logs or trigger an incident from the dashboard or webhook flow.
-
-Useful commands:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-python -m scripts.run_generator --demo-timeline --overwrite
-.\stop_all.ps1
-```
-
-`run_all.ps1` starts the FastAPI app and a small Codex CLI warm-up helper. `stop_all.ps1` stops the app listener and that helper only.
+Use [SETUP_AND_RUN.md](SETUP_AND_RUN.md) for the local setup steps, launch commands, and shutdown commands.
 
 ## Splunk Reference
 

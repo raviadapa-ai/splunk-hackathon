@@ -2,6 +2,8 @@
 
 This is the single Splunk reference for the project. It covers file monitoring, parsing, dashboards, Splunk-to-Python data movement, webhook alerting, and HEC writeback.
 
+For the end-to-end lifecycle sequence, see [INCIDENT_FLOW_SEQUENCE.md](INCIDENT_FLOW_SEQUENCE.md).
+
 ## 1. What Splunk Owns
 
 Splunk is responsible for:
@@ -17,9 +19,9 @@ Splunk is responsible for:
 Python is responsible for:
 
 - generating telemetry
-- maintaining incident state
+- maintaining canonical incident state and hydration
 - turning evidence into RCA
-- controlling remediation state changes
+- controlling remediation state transitions
 - writing the workflow audit logs that Splunk ingests
 
 ## 2. Files To Monitor
@@ -263,10 +265,10 @@ The action order is:
 1. Select an incident row.
 2. Run `Investigate`.
 3. Review the incident summary and evidence panels.
-4. Run `Prepare SPL`.
-5. Run `Approve`.
+4. Run `Prepare SPL` if you want the assistant artifacts.
+5. Run `Approve` once RCA is complete.
 6. Run `Execute`.
-7. Run `Reject` if needed.
+7. Run `Reject` instead of approval if the remediation should not proceed.
 8. Run `Close` only after execution.
 
 The action links call FastAPI directly. `Investigate` forces a fresh MCP + Codex pass so the dashboard and report reflect the latest evidence.
@@ -298,7 +300,7 @@ When the operator runs `Investigate`, Python does the following:
 3. Falls back to alert-context evidence if MCP is unavailable.
 4. Runs the deterministic RCA engine.
 5. Invokes Codex for a fresh second-pass AI summary when the CLI is available.
-6. Writes investigation and incident lifecycle logs back to disk.
+6. Writes investigation, triage, timeline, assistant, forecast, and incident lifecycle logs back to disk.
 7. Updates the dashboard once Splunk ingests the new logs.
 
 The investigation output is stored in:
@@ -558,7 +560,7 @@ index=ai_triages source="ai-mcp-triage-agent"
 - The correlation score is computed from signal density, host spread, and event count.
 - The result becomes a candidate incident.
 
-### Stage 4: Incident creation
+### Stage 4: Incident intake
 
 - FastAPI creates or hydrates the incident.
 - The incident is stored in `data/incidents.json`.
@@ -570,11 +572,12 @@ index=ai_triages source="ai-mcp-triage-agent"
 - `aiops-mcp-metrics` records the tool usage.
 - If MCP fails, the app falls back to alert-context evidence.
 
-### Stage 6: RCA and assistant prep
+### Stage 6: RCA, assistant prep, and triage
 
 - The decision engine produces root cause, confidence, and recommended actions.
 - `aiops-investigations` stores the investigation record.
 - `aiops-ai-assistant` stores the prompt and SPL suggestion.
+- `ai-mcp-triage-agent` stores the triage summary and writeback outcome.
 
 ### Stage 7: Forecast and risk
 
@@ -585,6 +588,7 @@ index=ai_triages source="ai-mcp-triage-agent"
 ### Stage 8: Approval and remediation
 
 - Approval is required before execution.
+- Rejection records that the operator declined the remediation path.
 - Execution is simulated.
 - Closure happens after execution.
 - `aiops-remediation` and `aiops-timeline` capture the state changes.
@@ -627,7 +631,9 @@ The project is designed so Splunk can show the whole lifecycle:
 - incident creation
 - MCP evidence
 - RCA
+- AI triage
 - approval
+- rejection
 - execution
 - closure
 - writeback

@@ -1,17 +1,19 @@
 # Splunk Agentic Ops Incident Copilot
 
-Splunk-native incident copilot for operational intelligence. This repo implements an end-to-end incident workflow where Python generates telemetry, Splunk ingests and analyzes it, alerts can hand off to FastAPI through a webhook, Splunk MCP provides evidence-backed investigation, Codex can perform a second-pass RCA, and the final investigation and remediation state is written back into Splunk for dashboard visibility and auditability.
+Splunk-native incident copilot for operational intelligence. This repo implements an end-to-end incident workflow where Python generates telemetry, Splunk ingests and analyzes it, alerts can hand off to FastAPI through a webhook, Splunk MCP provides evidence-backed investigation, Codex can perform a second-pass RCA, and the final investigation, AI triage, and remediation state is written back into Splunk for dashboard visibility and auditability.
+
+For the step-by-step lifecycle, see [INCIDENT_FLOW_SEQUENCE.md](INCIDENT_FLOW_SEQUENCE.md).
 
 ## What It Is
 
 This repo is a full incident workflow, not just a log generator.
 
-- Python generates telemetry, incident bursts, correlation records, AI artifacts, and remediation events.
+- Python generates telemetry, incident bursts, correlation records, AI artifacts, triage summaries, and remediation events.
 - Splunk ingests the JSONL files, extracts fields, computes latency baselines, reduces noise, and correlates signals into incident candidates.
-- FastAPI owns canonical incident state, webhook triage, dashboard actions, and remediation guards.
+- FastAPI owns canonical incident state, webhook triage, incident hydration, dashboard actions, and remediation guards.
 - Splunk MCP provides the evidence layer by calling the Splunk MCP server tools from Python.
 - Codex performs a second-pass RCA when the CLI is available, using the MCP evidence plus raw event context.
-- The app writes investigation, timeline, forecast, and remediation decisions back into JSONL logs that Splunk can monitor.
+- The app writes investigation, timeline, forecast, triage, and remediation decisions back into JSONL logs that Splunk can monitor.
 
 ## Current Architecture
 
@@ -21,11 +23,11 @@ app/telemetry.py
   -> Splunk file monitor ingests sourcetype="agentic-ops"
   -> SPL baseline / noise reduction / correlation searches
   -> candidate incident or alert threshold
-  -> webhook POST to FastAPI /webhook/splunk-alert
-  -> incident hydrated in data/incidents.json
+  -> webhook POST to FastAPI /webhook/splunk-alert or direct incident creation
+  -> incident hydrated or created in data/incidents.json
   -> SplunkMCPClient calls Splunk MCP server tools
   -> CodexRcaAgent may run a second-pass RCA
-  -> Python writes incidents, investigations, timeline, forecast, and remediation logs
+  -> Python writes incidents, investigations, timeline, forecast, triage, and remediation logs
   -> optional HEC writeback to Splunk for triage summaries
   -> Splunk dashboard refreshes from the re-ingested events
 ```
@@ -36,10 +38,10 @@ app/telemetry.py
 
 - Generates telemetry and controlled incident bursts in `app/telemetry.py`.
 - Owns the canonical incident record in `data/incidents.json`.
-- Exposes the FastAPI endpoints for incident creation, investigation, approval, execution, closeout, dashboard rendering, and webhook triage.
+- Exposes the FastAPI endpoints for incident creation, investigation, approval, rejection, execution, closeout, dashboard rendering, and webhook triage.
 - Calls Splunk MCP through `SplunkMCPClient` for evidence, metadata, and runtime verification.
 - Calls `CodexRcaAgent` when a second-pass AI RCA is available.
-- Writes workflow events to JSONL logs so Splunk can re-ingest the results.
+- Writes workflow events to JSONL logs so Splunk can re-ingest the results, including triage summaries and remediation transitions.
 
 ### Splunk
 
@@ -47,7 +49,7 @@ app/telemetry.py
 - Parses JSON fields and event timestamps from each record.
 - Performs statistical baseline checks, noise reduction, and correlation.
 - Exposes the operational dashboard and the saved-search layer used by the workflow.
-- Re-ingests workflow, evidence, and forecast logs for auditability and historical review.
+- Re-ingests workflow, evidence, triage, and forecast logs for auditability and historical review.
 
 ### Splunk MCP Server Integration
 
@@ -260,9 +262,16 @@ The correlation logic groups events into 5-minute windows and computes a score f
 
 The score produces a candidate incident severity that is shown on the dashboard and can trigger the webhook flow. In the current repo, the correlation search also writes the correlated result back through `write_correlation_event(...)`, which means the dashboard can show correlation history even after the alert has been processed.
 
-### 4. Incident creation
+### 4. Incident intake
 
 FastAPI creates the canonical incident object and stores it in `data/incidents.json`.
+
+The intake paths are:
+
+- `POST /incidents/create` for direct creation or burst injection
+- `POST /webhook/splunk-alert` for Splunk alert handoff
+
+If an incident is missing locally, the app can hydrate it from Splunk MCP evidence during investigation.
 
 Incident records track:
 
@@ -282,7 +291,7 @@ Incident records track:
 - execution result
 - HEC status for the triage writeback
 
-### 5. Evidence collection
+### 5. Evidence collection and RCA
 
 When investigation starts, the app queries Splunk MCP for incident evidence and metadata.
 
@@ -326,7 +335,7 @@ The agent:
 
 This keeps the AI pass evidence-driven instead of turning it into a free-form chat response.
 
-### 6. RCA and remediation planning
+### 6. Investigation lifecycle
 
 `app/decision_engine.py` derives the root cause, severity, confidence, recommended actions, and safe simulation actions from the evidence.
 
@@ -341,6 +350,14 @@ The engine is designed to be stable:
 - latency regression maps to a latency anomaly or slow service path
 
 The deterministic RCA layer is important because it gives the workflow a stable answer even when Codex or MCP are unavailable.
+
+The current lifecycle is:
+
+```text
+OPEN -> INVESTIGATED -> COMPLETED -> APPROVED or REJECTED -> EXECUTED -> CLOSED
+```
+
+`status` tracks the broad lifecycle, while `remediation_status` tracks the remediation-specific state.
 
 ### 7. AI Assistant and forecast artifacts
 
@@ -381,7 +398,7 @@ Webhook triage flow:
 4. Python queries MCP for surrounding evidence.
 5. The RCA engine and optional Codex pass produce the investigation result.
 6. The result is written back to the local event logs and optionally to Splunk via HEC.
-7. The dashboard refreshes with the new incident state and summary.
+7. The dashboard refreshes with the new incident state, triage summary, and remediation status.
 
 ### 9. HEC writeback
 
@@ -426,7 +443,7 @@ Behavior:
 
 ### 10. From Python back to Splunk
 
-After investigation, FastAPI writes updated incident state, investigation output, AI assistant prompt data, forecast output, and remediation events to JSONL logs.
+After investigation, FastAPI writes updated incident state, investigation output, AI assistant prompt data, forecast output, triage summaries, and remediation events to JSONL logs.
 
 Splunk re-ingests those logs, so the dashboard reflects:
 
@@ -436,6 +453,7 @@ Splunk re-ingests those logs, so the dashboard reflects:
 - the selected remediation
 - the assistant prompt and SPL suggestion
 - the forecast view
+- the latest triage summary
 - the latest webhook triage result
 
 ## Dashboard In Splunk
@@ -478,7 +496,7 @@ The dashboard is backed by `splunk/dashboard_simple.xml` and the reusable search
 ### Dashboard behavior
 
 - `Investigate` opens a fresh analysis path.
-- `Approve` is enabled only when the incident has RCA evidence.
+- `Approve` is enabled only when the incident has completed RCA evidence.
 - `Execute` is blocked until approval is recorded.
 - `Reject` records that the operator declined remediation.
 - `Close` finalizes the incident after execution.
@@ -518,9 +536,9 @@ Splunk can search these logs for:
 - correlation events
 - MCP tool metrics
 - AI assistant prep
+- AI triage summaries
 - forecast signals
 - remediation transitions
-- triage summaries
 
 ## Data Movement Between Splunk And Python
 
@@ -591,9 +609,15 @@ In this repo those helpers are optional. The app still works when Splunk AI Assi
 - `requirements.txt` runtime dependencies
 - `.env.example` environment template
 
-## Setup And Run
+## Local Run
 
-Use [SETUP_AND_RUN.md](SETUP_AND_RUN.md) for the local setup steps, launch commands, and shutdown commands.
+1. Copy `.env.example` to `.env` and set any local values you need.
+2. Install the dependencies from `requirements.txt`.
+3. Run `.\run_all.ps1`.
+4. Open the FastAPI dashboard at `http://127.0.0.1:8002/dashboard`.
+5. Generate logs or trigger an incident from the dashboard or webhook flow.
+
+`run_all.ps1` starts the FastAPI app and a small Codex CLI warm-up helper. `stop_all.ps1` stops the app listener and that helper only.
 
 ## Splunk Reference
 
@@ -624,4 +648,5 @@ The project is covered by API, telemetry, decision-engine, and MCP client tests 
 - `Investigate` triggers a fresh MCP + Codex pass.
 - The dashboard prefers the latest AI triage record in `data/ai_triages.log` for AI summary fields.
 - `mcp_evidence_summary` is persisted from investigation logs so it does not render as `null` after refresh.
+- `INCIDENT_FLOW_SEQUENCE.md` is the stage-by-stage reference for the current incident lifecycle.
 - `run_all.ps1` and `stop_all.ps1` manage only the app port and the Codex CLI helper.

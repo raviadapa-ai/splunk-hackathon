@@ -19,11 +19,7 @@ htmlcov/
 pytest-cache-files-*/
 
 # Generated demo/runtime data
-data/*.log
-data/incidents.json
-data/test_*/
-data/*.tmp
-data/*.bak
+
 
 # Bundle / export artifacts
 code.txt

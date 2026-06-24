@@ -1,0 +1,42 @@
+{"timestamp":"2026-06-11T23:51:01.952+05:30","status":"failed","startup_timestamp":"2026-06-11T23:50:45.262+05:30","fallback_reason":"[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1000)","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T00:33:18.380+05:30","status":"failed","startup_timestamp":"2026-06-12T00:33:17.587+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T00:54:05.193+05:30","status":"failed","startup_timestamp":"2026-06-12T00:54:01.841+05:30","fallback_reason":"[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1000)","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T01:54:41.573+05:30","status":"failed","startup_timestamp":"2026-06-12T01:54:38.441+05:30","fallback_reason":"[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1000)","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T01:55:57.200+05:30","status":"failed","startup_timestamp":"2026-06-12T01:55:53.745+05:30","fallback_reason":"[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1000)","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T02:00:08.145+05:30","status":"failed","startup_timestamp":"2026-06-12T02:00:07.227+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T02:01:52.245+05:30","status":"failed","startup_timestamp":"2026-06-12T02:01:50.249+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T02:03:19.283+05:30","status":"failed","startup_timestamp":"2026-06-12T02:03:18.333+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T02:06:45.258+05:30","status":"failed","startup_timestamp":"2026-06-12T02:06:44.348+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T02:12:46.966+05:30","status":"failed","startup_timestamp":"2026-06-12T02:12:46.009+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T02:30:18.489+05:30","status":"failed","startup_timestamp":"2026-06-12T02:30:17.551+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T02:31:28.077+05:30","status":"failed","startup_timestamp":"2026-06-12T02:31:27.172+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T08:33:51.912+05:30","status":"failed","startup_timestamp":"2026-06-12T08:33:50.831+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T08:34:27.961+05:30","status":"failed","startup_timestamp":"2026-06-12T08:34:26.892+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T08:58:21.711+05:30","status":"failed","startup_timestamp":"2026-06-12T08:58:20.772+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T09:06:05.537+05:30","status":"failed","startup_timestamp":"2026-06-12T09:06:04.630+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T09:07:50.854+05:30","status":"failed","startup_timestamp":"2026-06-12T09:07:49.969+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T09:30:36.608+05:30","status":"failed","startup_timestamp":"2026-06-12T09:30:35.747+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T09:34:12.477+05:30","status":"failed","startup_timestamp":"2026-06-12T09:34:11.597+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T09:39:37.162+05:30","status":"failed","startup_timestamp":"2026-06-12T09:39:36.228+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-12T09:43:53.342+05:30","status":"failed","startup_timestamp":"2026-06-12T09:43:52.431+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-13T11:01:38.739+05:30","status":"failed","startup_timestamp":"2026-06-13T11:01:37.722+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-13T11:03:31.273+05:30","status":"failed","startup_timestamp":"2026-06-13T11:03:30.362+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-13T11:04:51.501+05:30","status":"failed","startup_timestamp":"2026-06-13T11:04:50.595+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-13T11:07:10.713+05:30","status":"failed","startup_timestamp":"2026-06-13T11:07:09.621+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-13T14:34:37.401+05:30","status":"failed","startup_timestamp":"2026-06-13T14:34:36.626+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-13T21:35:58.693+05:30","status":"failed","startup_timestamp":"2026-06-13T21:35:57.918+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-13T21:42:07.925+05:30","status":"failed","startup_timestamp":"2026-06-13T21:42:06.029+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-13T21:44:29.533+05:30","status":"failed","startup_timestamp":"2026-06-13T21:44:28.565+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-13T21:49:33.981+05:30","status":"failed","startup_timestamp":"2026-06-13T21:49:33.079+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-13T22:29:46.308+05:30","status":"failed","startup_timestamp":"2026-06-13T22:29:44.721+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-14T01:41:36.129+05:30","status":"failed","startup_timestamp":"2026-06-14T01:41:35.166+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-14T01:44:35.383+05:30","status":"failed","startup_timestamp":"2026-06-14T01:44:34.479+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-14T01:45:12.451+05:30","status":"failed","startup_timestamp":"2026-06-14T01:45:11.600+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-14T08:06:22.588+05:30","status":"failed","startup_timestamp":"2026-06-14T08:06:20.883+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-14T10:18:19.382+05:30","status":"failed","startup_timestamp":"2026-06-14T10:18:17.112+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-14T10:42:50.305+05:30","status":"failed","startup_timestamp":"2026-06-14T10:42:49.093+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-14T10:57:02.774+05:30","status":"failed","startup_timestamp":"2026-06-14T10:57:01.888+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-14T11:02:47.519+05:30","status":"failed","startup_timestamp":"2026-06-14T11:02:44.662+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-14T11:05:40.018+05:30","status":"failed","startup_timestamp":"2026-06-14T11:05:39.155+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-14T12:40:42.128+05:30","status":"failed","startup_timestamp":"2026-06-14T12:40:41.234+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
+{"timestamp":"2026-06-14T14:09:25.691+05:30","status":"failed","startup_timestamp":"2026-06-14T14:09:23.637+05:30","fallback_reason":"","sourcetype":"aiops-system-health"}
